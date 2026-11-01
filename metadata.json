@@ -1,0 +1,8 @@
+{
+  "name": "Remix CreatorIntel Notion \u0026 Sheet Sync",
+  "description": "AI research agent that parses spreadsheets of 40+ content creators, discovers their cross-platform social media content, answers 5 custom executive evaluation questions, writes responses back to the spreadsheet, and synchronizes human-readable executive dossiers to Notion via the Notion API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
