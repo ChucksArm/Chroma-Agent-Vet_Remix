@@ -70,6 +70,44 @@ export type ProjectToneMode =
   | 'hybrid-nyc-bree'
   | 'sf-ya-6th-grade';
 
+export type CommentBulletFormat =
+  | 'numbered-and-dashes'
+  | 'dashes-only'
+  | 'numbered-only';
+
+export type ModificationAuthorType = 'ai-agent' | 'brianna' | 'both-agent-and-brianna';
+
+export type PreLiveStagingStatus =
+  | 'unstaged'
+  | 'in-staging-table'
+  | 'pushed-to-notion-staging'
+  | 'checked-in-notion'
+  | 'live';
+
+export interface ModificationAttributionBlob {
+  authorMode: ModificationAuthorType;
+  lastUpdatedAt: string;
+  agentBlob: {
+    timestamp: string;
+    toneModeApplied: string;
+    fieldsGenerated: string[];
+    agentCommentDraft: string;
+    agentTeamTake: TeamTakeType;
+    agentVerdict: VerdictType;
+    summary: string;
+  };
+  briannaBlob: {
+    hasBriannaEdits: boolean;
+    timestamp?: string;
+    fieldsModifiedByBrianna: string[];
+    briannaCommentOverride?: string;
+    briannaTeamTakeOverride?: TeamTakeType;
+    briannaVerdictOverride?: VerdictType;
+    briannaActionNote?: string;
+  };
+  serializedDiffBlob: string;
+}
+
 export interface CreatorRecord {
   id: string;
   rank: number;
@@ -96,6 +134,7 @@ export interface CreatorRecord {
   watchedItems: WatchedItem[];
   competitorTies: CompetitorTie[];
   vettingDossier: VettingDossier;
+  baselineDossier?: VettingDossier; // Preserves original creator-specific rich dossier across tone switches
   status: 'idle' | 'researching' | 'completed' | 'error';
   notionSyncStatus: 'unsynced' | 'syncing' | 'synced';
   notionPageId?: string;
@@ -104,6 +143,14 @@ export interface CreatorRecord {
   notionSyncOperation?: 'created' | 'updated';
   groundingSources?: GroundingSource[];
   errorMessage?: string;
+  // Attribution Blob (AI Agent vs. Brianna) & Pre-Live Staging Table State
+  modificationBlob?: ModificationAttributionBlob;
+  preLiveStagingStatus?: PreLiveStagingStatus;
+  notionStagingPageId?: string;
+  notionStagingTableUrl?: string;
+  notionStagingPushedAt?: string;
+  notionStagingCheckedByBrianna?: boolean;
+  madeLiveAt?: string;
 }
 
 export interface VettingQuestionsConfig {

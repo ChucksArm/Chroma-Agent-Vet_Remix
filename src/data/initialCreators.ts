@@ -1,10 +1,12 @@
 import {
   CreatorRecord,
+  VettingDossier,
   VettingQuestionsConfig,
   NotionWorkspaceScanResult,
   NotionDatabaseColumnSpec,
   SocialPlatformType,
-  ProjectToneMode
+  ProjectToneMode,
+  CommentBulletFormat
 } from '../types';
 
 export const NOTION_DESK_URL = 'https://app.notion.com/p/40457c4d75c0819d90c8cb35f1024e89';
@@ -247,6 +249,13 @@ export const AGENT_DB_SCHEMA_COLUMNS: NotionDatabaseColumnSpec[] = [
     agentSourceField: 'vettingDossier.formattedNotionComment',
     category: '5 Evaluation Answers & @Bree Output',
     description: 'Complete formatted comment matching AidaOverthinking Things benchmark and tagging @Bree'
+  },
+  {
+    columnName: 'Modification Attribution Blob (Agent vs Brianna)',
+    notionType: 'rich_text',
+    agentSourceField: 'modificationBlob.serializedDiffBlob',
+    category: '5 Evaluation Answers & @Bree Output',
+    description: 'Structured attribution blob differentiating AI Agent modifications from Brianna manual edits'
   }
 ];
 
@@ -272,6 +281,15 @@ export function formatCreatorForDatabaseRow(
     : (c.competitorTies || []).length > 0
     ? 'Low'
     : 'None';
+
+  const fallbackBlob = JSON.stringify({
+    attributionAuthor: c.rank <= 3 ? 'Brianna (Benchmark)' : 'AI Vetting Agent Only',
+    aiAgentModification: { fieldsGenerated: 8, teamTake: c.teamTake },
+    briannaModification: {
+      modifiedByBrianna: c.rank <= 3 || Boolean(c.toneOverride),
+      note: c.rank <= 3 ? 'Locked Reference Benchmark' : 'Standard AI Agent Draft'
+    }
+  });
 
   return {
     Name: c.name,
@@ -300,7 +318,9 @@ export function formatCreatorForDatabaseRow(
     'Q5: Recommend Chromatics & Why': c.vettingDossier.recommendChromaticsWhy,
     'Outreach Lead Hook': c.vettingDossier.outreachLeadHook,
     'Gut Feeling': c.vettingDossier.gutFeeling,
-    'Notion Comment (@Bree)': c.vettingDossier.formattedNotionComment
+    'Notion Comment (@Bree)': c.vettingDossier.formattedNotionComment,
+    'Modification Attribution Blob (Agent vs Brianna)':
+      c.modificationBlob?.serializedDiffBlob || fallbackBlob
   };
 }
 
@@ -473,11 +493,11 @@ Brand ties: Zero paid sponsorships, discount codes, or affiliate links detected.
 Would I recommend Chromatics?: Yes, as a companion for tackling Ulysses and Russian classics on iOS (iPhone/iPad).
 Gut feeling: Authentic, well-read, visual pitch showing colored dialogue lines will land best. @Max Buck`;
 
-export const SARA_REFERENCE_COMMENT = `watched 3 of her stories that are on her profile saved - book II, collaborations, book reviews on her instagram page (https://www.instagram.com/bookish.victorian?xtok=MXRxeXZoNnVvNnV5NA==#t=0m42s at 0:42) and checked her notion page (https://app.notion.com/p/Sara-40457c4d75c081c7b3dad3c2d58b8613?source=copy_link)
-- her readers are design nerds who read on their phones during morning train rides instead of scrolling,
+export const SARA_REFERENCE_COMMENT = `https://www.instagram.com/bookish.victorian?xtok=MXRxeXZoNnVvNnV5NA== Is her instagram page that I watched 3 of her stories that are on her profile saved - book II, collaborations, book reviews .
+her readers are design nerds who read on their phones during morning train rides instead of scrolling,
 -she hates ai slop but loves good app design, -she only mentions apple books and serial reader for fun with zero paid ads.
 -i'd quote her line about e-books feeling flat and tell her we made chromatics on iOS with color-coded lines and matched-up audio to fix that exact thing.
-- gut says total slam dunk, she basically wrote our pitch for us @Bree`;
+gut says total slam dunk, she basically wrote our pitch for us @Bree`;
 
 export const DEFAULT_VETTING_QUESTIONS: VettingQuestionsConfig = {
   q1: '1. What video/post I watched in full (title & honest reaction):',
@@ -1087,6 +1107,187 @@ export function applyRankFatigueTypos(
   return out.replace(/__safe_tok_(\d+)__/gi, (_m, idx) => protectedTokens[Number(idx)] || '');
 }
 
+// Condenses a long dossier field into a punchy, shrunk-down single line while preserving URLs and quoted titles
+function shrinkTextForTemplate(rawText: string, maxChars: number = 220): string {
+  const cleaned = String(rawText || '')
+    .split('\n')
+    .map((l) => l.replace(/^[\s•*\-]+/, '').trim())
+    .filter(Boolean)
+    .join(' — ');
+  if (!cleaned) return '—';
+  if (cleaned.length <= maxChars) return cleaned;
+  // Never slice inside a URL
+  const sliced = cleaned.slice(0, maxChars).replace(/\s+\S*$/, '');
+  return `${sliced}...`;
+}
+
+// Builds the concatenated, shrunk-down copy of the Structured Vetting Questions & Answers + Blobs of Info
+// rewritten in the tone of the user's choosing, formatted with numbered bullet points (1-5) and/or '-' dashes
+export function buildShrunkConcatenatedCommentTemplate(
+  creator: CreatorRecord,
+  dossier: VettingDossier,
+  mode: ProjectToneMode,
+  bulletFormat: CommentBulletFormat = 'numbered-and-dashes',
+  options?: {
+    forceFatigueOnReference?: boolean;
+  }
+): string {
+  const pronouns = getCreatorPronouns(creator.name);
+  const modAuthor =
+    creator.modificationBlob?.authorMode === 'both-agent-and-brianna'
+      ? 'ai-agent + brianna'
+      : creator.modificationBlob?.authorMode === 'brianna'
+      ? 'brianna modified'
+      : 'ai-agent draft';
+
+  const flagOrResearchSnippet = shrinkTextForTemplate(
+    creator.flagNote || creator.researchNotes || creator.niche,
+    115
+  );
+  const tiesSummary =
+    creator.competitorTies && creator.competitorTies.length > 0
+      ? creator.competitorTies
+          .map((t) => `${t.company} (${t.relationshipType} · ${t.activeConflictRisk} risk)`)
+          .join(', ')
+      : '0 watchlist conflicts';
+
+  // Shrunk Info & Attribution Blob line
+  const infoBlobRaw = `#${String(creator.rank).padStart(2, '0')} ${creator.name} (${creator.handle} · ${creator.followersCount} · ${creator.avgEngagementRate} eng · ${(creator.platforms || []).join('/')} · niche: ${creator.niche}) | verdict: ${creator.verdict} · take: ${creator.teamTake} | ties: ${tiesSummary} | blob: [${modAuthor}] ${flagOrResearchSnippet}`;
+
+  const overallShrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.overallSummary || ''),
+    190
+  );
+  const q1Shrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.watchedOrRead || ''),
+    260
+  );
+  const q2Shrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.audienceProfile || ''),
+    190
+  );
+  const q3Shrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.readingAppsEreadersAndAI || ''),
+    190
+  );
+  const q4Shrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.competitorTiesAnalysis || ''),
+    190
+  );
+  const q5Shrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.recommendChromaticsWhy || ''),
+    190
+  );
+  const leadHookShrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.outreachLeadHook || ''),
+    230
+  );
+  const gutShrunk = shrinkTextForTemplate(
+    toPlainEverydayEnglish(dossier.gutFeeling || '').replace(/@bree/gi, '').trim(),
+    160
+  );
+
+  // Tone-aware shrunk question labels
+  const labels =
+    mode === 'sf-ya-6th-grade'
+      ? {
+          blob: 'creator & edit blob',
+          overall: 'overall',
+          q1: 'what video/post i watched in full (title & honest reaction)',
+          q2: 'who their audience feels like (vibe & community)',
+          q3: 'how they talk about reading apps, e-readers & ai',
+          q4: 'any brand / competitor ties noticed (fable, kobo, audible, kindle)',
+          q5: 'would i honestly recommend chromatics to their audience & why?',
+          hook: 'the one thing to lead with in outreach email',
+          gut: 'gut feeling on this creator'
+        }
+      : mode === 'bree-loose'
+      ? {
+          blob: 'info & mod blob',
+          overall: 'overall vibe',
+          q1: 'watched in full (clip + gut reaction)',
+          q2: 'audience vibe & crowd',
+          q3: 'reading apps, e-readers & ai',
+          q4: 'brand / competitor ties (fable, kobo, audible, kindle)',
+          q5: 'honestly recommend chromatics & why',
+          hook: 'one thing to lead with in email',
+          gut: 'gut feeling'
+        }
+      : mode === 'hybrid-nyc-bree'
+      ? {
+          blob: 'creator + attribution blob',
+          overall: 'overall',
+          q1: 'watched in full (title & reaction)',
+          q2: `${pronouns.possessiveLower} audience vibe`,
+          q3: 'reading apps, e-readers & ai stance',
+          q4: 'competitor ties (fable, kobo, audible, kindle)',
+          q5: 'recommend chromatics on iOS & why',
+          hook: 'one thing to lead with in outreach email',
+          gut: 'gut feeling'
+        }
+      : {
+          blob: 'creator & attribution blob',
+          overall: 'overall',
+          q1: 'watched in full (title & honest reaction)',
+          q2: 'audience vibe & community',
+          q3: 'reading apps, e-readers & ai',
+          q4: 'brand / competitor ties (fable, kobo, audible, kindle)',
+          q5: 'honestly recommend chromatics & why?',
+          hook: 'one thing to lead with in outreach email',
+          gut: 'gut feeling on this creator'
+        };
+
+  let lines: string[] = [];
+
+  // For Rank #3 Sara (@bookish.victorian), preserve Boss Max Buck's "fire" note at the top of the template
+  if (creator.rank === 3) {
+    lines.push(SARA_REFERENCE_COMMENT.replace(/\s*@Bree\s*$/i, '').trim());
+  }
+
+  if (bulletFormat === 'dashes-only') {
+    lines.push(
+      `- [${labels.blob}]: ${infoBlobRaw}`,
+      `- ${labels.overall}: ${overallShrunk}`,
+      `- 1. ${labels.q1}: ${q1Shrunk}`,
+      `- 2. ${labels.q2}: ${q2Shrunk}`,
+      `- 3. ${labels.q3}: ${q3Shrunk}`,
+      `- 4. ${labels.q4}: ${q4Shrunk}`,
+      `- 5. ${labels.q5}: ${q5Shrunk}`,
+      `- ${labels.hook}: ${leadHookShrunk}`,
+      `- ${labels.gut}: ${gutShrunk} @Bree`
+    );
+  } else if (bulletFormat === 'numbered-only') {
+    lines.push(
+      `0. [${labels.blob}]: ${infoBlobRaw}`,
+      `1. ${labels.overall}: ${overallShrunk}`,
+      `2. ${labels.q1}: ${q1Shrunk}`,
+      `3. ${labels.q2}: ${q2Shrunk}`,
+      `4. ${labels.q3}: ${q3Shrunk}`,
+      `5. ${labels.q4}: ${q4Shrunk}`,
+      `6. ${labels.q5}: ${q5Shrunk}`,
+      `7. ${labels.hook}: ${leadHookShrunk}`,
+      `8. ${labels.gut}: ${gutShrunk} @Bree`
+    );
+  } else {
+    // Default 'numbered-and-dashes': '-' dashes for Info Blob, Overall, Lead Hook, Gut Feeling + 1-5 Numbered Bullets for the 5 Questions
+    lines.push(
+      `- [${labels.blob}]: ${infoBlobRaw}`,
+      `- ${labels.overall}: ${overallShrunk}`,
+      `1. ${labels.q1}: ${q1Shrunk}`,
+      `2. ${labels.q2}: ${q2Shrunk}`,
+      `3. ${labels.q3}: ${q3Shrunk}`,
+      `4. ${labels.q4}: ${q4Shrunk}`,
+      `5. ${labels.q5}: ${q5Shrunk}`,
+      `- ${labels.hook}: ${leadHookShrunk}`,
+      `- ${labels.gut}: ${gutShrunk} @Bree`
+    );
+  }
+
+  const rawJoined = lines.join('\n');
+  const forceFatigue = Boolean(options?.forceFatigueOnReference);
+  return applyRankFatigueTypos(rawJoined, creator.rank, mode, forceFatigue);
+}
+
 // Rewrites a creator's @Bree comment AND 5 boss answers in any of the 4 Project Tone Modes
 export function formatCreatorNoteByTone(
   creator: CreatorRecord,
@@ -1094,6 +1295,8 @@ export function formatCreatorNoteByTone(
   options?: {
     allowReferenceOverride?: boolean;
     rawPastedTextToConvert?: string;
+    bulletFormat?: CommentBulletFormat;
+    useEditedDossierDirectly?: boolean;
   }
 ): {
   formattedNotionComment: string;
@@ -1106,33 +1309,6 @@ export function formatCreatorNoteByTone(
   outreachLeadHook: string;
   gutFeeling: string;
 } {
-  const isLockedReference =
-    (creator.rank <= 3 || creator.isReferenceBenchmark) &&
-    !options?.allowReferenceOverride &&
-    (!creator.toneOverride || creator.toneOverride === 'reference-locked');
-
-  if (isLockedReference) {
-    const refComment =
-      creator.rank === 1
-        ? AIDA_NYC_COMMENT
-        : creator.rank === 2
-        ? TRICIA_NYC_COMMENT
-        : creator.rank === 3
-        ? SARA_REFERENCE_COMMENT
-        : creator.vettingDossier.formattedNotionComment;
-    return {
-      formattedNotionComment: refComment,
-      overallSummary: creator.vettingDossier.overallSummary || '',
-      watchedOrRead: creator.vettingDossier.watchedOrRead,
-      audienceProfile: creator.vettingDossier.audienceProfile,
-      readingAppsEreadersAndAI: creator.vettingDossier.readingAppsEreadersAndAI,
-      competitorTiesAnalysis: creator.vettingDossier.competitorTiesAnalysis,
-      recommendChromaticsWhy: creator.vettingDossier.recommendChromaticsWhy,
-      outreachLeadHook: creator.vettingDossier.outreachLeadHook,
-      gutFeeling: creator.vettingDossier.gutFeeling
-    };
-  }
-
   const effectiveMode: ProjectToneMode =
     creator.toneOverride &&
     creator.toneOverride !== 'reference-locked' &&
@@ -1140,28 +1316,66 @@ export function formatCreatorNoteByTone(
       ? creator.toneOverride
       : mode;
 
+  const bulletFormat: CommentBulletFormat = options?.bulletFormat || 'numbered-and-dashes';
+
+  // Use baselineDossier when switching tones so each creator's unique niche, videos, audience, apps, and ties are always preserved
+  const sourceDossier: VettingDossier =
+    options?.useEditedDossierDirectly || !creator.baselineDossier
+      ? creator.vettingDossier
+      : creator.baselineDossier;
+
   const pronouns = getCreatorPronouns(creator.name);
   const w0 = creator.watchedItems?.[0];
   const w1 = creator.watchedItems?.[1];
   const primaryCitation = w0
     ? formatUrlWithTimestamp(w0.url, creator.rank)
-    : extractVideoCitation(creator.vettingDossier.watchedOrRead, creator.name);
-  const primaryTitle = w0 ? `"${w0.title}"` : extractVideoCitation(creator.vettingDossier.watchedOrRead, creator.name).quotedTitle;
+    : extractVideoCitation(sourceDossier.watchedOrRead, creator.name);
+  const primaryTitle = w0
+    ? `"${w0.title}"`
+    : extractVideoCitation(sourceDossier.watchedOrRead, creator.name).quotedTitle;
   const secondaryCitation = w1 ? formatUrlWithTimestamp(w1.url, creator.rank + 3) : null;
 
   const rawCrowd = toPlainEverydayEnglish(
-    firstClause(creator.vettingDossier.audienceProfile).replace(/^[•*\-]\s*/, '').replace(/\.$/, '').toLowerCase()
+    firstClause(sourceDossier.audienceProfile)
+      .replace(/^[•*\-]\s*/, '')
+      .replace(/\.$/, '')
+      .toLowerCase()
   );
   const rawApps = toPlainEverydayEnglish(
-    firstClause(creator.vettingDossier.readingAppsEreadersAndAI).replace(/^[•*\-]\s*/, '').replace(/\.$/, '').toLowerCase()
+    firstClause(sourceDossier.readingAppsEreadersAndAI)
+      .replace(/^[•*\-]\s*/, '')
+      .replace(/\.$/, '')
+      .toLowerCase()
   );
   const rawTies = toPlainEverydayEnglish(
-    firstClause(creator.vettingDossier.competitorTiesAnalysis).replace(/^[•*\-]\s*/, '').replace(/\.$/, '').toLowerCase()
+    firstClause(sourceDossier.competitorTiesAnalysis)
+      .replace(/^[•*\-]\s*/, '')
+      .replace(/\.$/, '')
+      .toLowerCase()
   );
-  const hasNoTies = /zero|no |none|didn't find|neither video|unsponsored|only a|only links/i.test(rawTies);
-  const tieShort = hasNoTies
-    ? 'zero paid ads or codes with kindle, fable, or audible'
-    : rawTies;
+  const rawRecDetail = toPlainEverydayEnglish(
+    firstClause(sourceDossier.recommendChromaticsWhy)
+      .replace(/^[•*\-]\s*/, '')
+      .replace(/^(yes|no)\s*[,—\-:]?\s*/i, '')
+      .replace(/\.$/, '')
+      .toLowerCase()
+  );
+  const rawGutDetail = toPlainEverydayEnglish(
+    firstClause(sourceDossier.gutFeeling)
+      .replace(/^[•*\-]\s*/, '')
+      .replace(/\.$/, '')
+      .toLowerCase()
+  );
+
+  const hasNoTies = /zero|no |none|didn't find|did not find|neither video|unsponsored|only a|only mentions|only links/i.test(
+    rawTies
+  );
+  const tieShort =
+    creator.competitorTies && creator.competitorTies.length > 0
+      ? `${creator.competitorTies.map((t) => `${t.company} (${t.relationshipType.toLowerCase()})`).join(', ')} — ${rawTies}`
+      : hasNoTies
+      ? `zero paid ads or promo codes with kindle, fable, or audible (${rawTies})`
+      : rawTies;
 
   const storiesNote =
     creator.savedStoriesWatched && creator.savedStoriesWatched.length > 0
@@ -1172,7 +1386,11 @@ export function formatCreatorNoteByTone(
             : ''
         }`;
 
-  let commentDraft = '';
+  const nicheShort = toPlainEverydayEnglish(creator.niche.toLowerCase());
+  const w0Topic = w0?.summary
+    ? toPlainEverydayEnglish(w0.summary.charAt(0).toLowerCase() + w0.summary.slice(1).replace(/\.$/, ''))
+    : nicheShort;
+
   let q1Watched = '';
   let q2Audience = '';
   let q3Apps = '';
@@ -1183,111 +1401,91 @@ export function formatCreatorNoteByTone(
   let overallDraft = '';
 
   if (effectiveMode === 'sf-ya-6th-grade') {
-    // Mode 4: SF YA 6th-Grade Reader (reads ~5 YA books a year, simple 6th-grade vocabulary)
-    q1Watched = `${storiesNote} and it was super cool seeing ${pronouns.objectLower} talk about big books without making it boring`;
-    q2Audience = `people who read on their phones on the bart train or in bed and want more than 5 books a year without getting confused by all the names`;
-    q3Apps = `${pronouns.subjectLower} doesnt like fake ai stuff at all and mostly just wants a phone app that looks nice and is easy to use`;
+    // Mode 4: SF YA 6th-Grade Reader (reads ~5 YA books a year, simple 6th-grade vocabulary, tailored to THIS creator's data)
+    q1Watched = `${storiesNote} where ${pronouns.subjectLower} covers ${w0Topic} and it was super cool seeing ${pronouns.objectLower} talk about big books without making it boring`;
+    q2Audience = `${rawCrowd} (${creator.followersCount} followers in ${nicheShort}) who read on their phones on the bart train or in bed and want more than 5 books a year without getting confused by all the names`;
+    q3Apps = `${rawApps} — ${pronouns.subjectLower} doesnt like fake ai stuff at all and mostly just wants a phone app that looks nice and is easy to use`;
     q4Ties = hasNoTies
-      ? `no paid ads or promo codes with kindle or audible or fable so we are totally good`
-      : `spotted ${tieShort} so we should keep that in mind`;
+      ? `no paid ads or promo codes with kindle or audible or fable (${tieShort}) so we are totally good`
+      : `spotted ${tieShort} so we should keep that in mind before emailing`;
     q5Rec =
       creator.teamTake === 'Not a fit'
-        ? `no bc ${pronouns.subjectLower} mostly posts about running and other stuff now instead of books`
-        : `yes for sure because when you read a giant book with tons of people talking the color lines and voice audio on iPhone make it way easier to follow along`;
-    hookDraft = `hey i saw your clip ${primaryTitle} (${primaryCitation.timestampedUrl} at ${primaryCitation.timestampLabel}) and we made chromatics on iOS where every person talking gets their own color so you never get lost`;
+        ? `no bc ${pronouns.subjectLower} mostly posts about non-book stuff now (${rawRecDetail})`
+        : `yes for sure (${rawRecDetail}) — when you read a giant book with tons of people talking the color lines and voice audio on iPhone make it way easier to follow along`;
+    hookDraft = `hey i saw your clip ${primaryTitle} (${primaryCitation.timestampedUrl} at ${primaryCitation.timestampLabel}) about ${nicheShort} and we made chromatics on iOS where every person talking gets their own color so you never get lost`;
     gutDraft =
       creator.teamTake === 'Not a fit'
-        ? `skip for now since ${pronouns.subjectLower} stopped doing book videos`
+        ? `skip for now since ${pronouns.subjectLower} stopped doing book videos (${rawGutDetail})`
         : creator.teamTake === 'Maybe'
-        ? `kinda 50/50 bc of the other app link but still worth a friendly dm`
-        : `total yes, i only read like 5 ya books a year and even i wanted to try the books ${pronouns.subjectLower} showed`;
-    overallDraft = `super chill creator — ${q5Rec}`;
-
-    commentDraft =
-      creator.teamTake === 'Not a fit'
-        ? `${storiesNote} for about ten mins and honestly ${pronouns.subjectLower} switched to non-book stuff now so ${q2Audience} isnt really there anymore, zero need to pitch chromatics here — gut says easy skip @Bree`
-        : `${storiesNote} and honestly even for someone like me in sf who only reads like 5 ya books a year ${pronouns.subjectLower} makes these giant books sound so fun, ${pronouns.possessiveLower} followers are ${rawCrowd} who read on their phones, ${pronouns.subjectLower} hates fake ai junk, and ${tieShort}\n\nid just dm ${pronouns.objectLower} about ${primaryTitle} (${primaryCitation.timestampedUrl} at ${primaryCitation.timestampLabel}) and tell ${pronouns.objectLower} we made chromatics on iOS with color lines for each character and matched-up audio so you never get mixed up on who is talking — gut says big yes @Bree`;
+        ? `kinda 50/50 bc of the brand link (${rawGutDetail}) but still worth a friendly dm`
+        : `total yes (${rawGutDetail}), i only read like 5 ya books a year and even i wanted to try the books ${pronouns.subjectLower} showed`;
+    overallDraft = `super chill ${nicheShort} creator (${creator.handle}) — ${q5Rec}`;
   } else if (effectiveMode === 'bree-loose') {
-    // Mode 2: Loose Bree Unedited (stream-of-consciousness run-on paragraph)
-    q1Watched = `${storiesNote} all the way thru`;
-    q2Audience = `${rawCrowd} who read on phones during morning train rides instead of scrolling`;
+    // Mode 2: Loose Bree Unedited
+    q1Watched = `${storiesNote} all the way thru (${w0Topic})`;
+    q2Audience = `${rawCrowd} (${creator.followersCount}, ${creator.avgEngagementRate} eng) who read on phones during morning train rides instead of scrolling`;
     q3Apps = `${rawApps} and hates ai slop but loves good app design`;
     q4Ties = `${tieShort}`;
     q5Rec =
       creator.teamTake === 'Not a fit'
-        ? `pass — channel moved off books`
-        : `yes chromatics on iOS with color-coded lines and matched-up audio fixes the exact thing ${pronouns.subjectLower} talks about`;
+        ? `pass — channel moved off books (${rawRecDetail})`
+        : `yes chromatics on iOS with color-coded lines and matched-up audio fixes the exact thing ${pronouns.subjectLower} talks about (${rawRecDetail})`;
     hookDraft = `quote ${pronouns.possessiveLower} take at ${primaryCitation.timestampLabel} in ${primaryTitle} (${primaryCitation.timestampedUrl}) and tell ${pronouns.objectLower} we made chromatics on iOS with color-coded lines and matched-up audio`;
     gutDraft =
       creator.teamTake === 'Not a fit'
-        ? `easy pass moving to vetted`
+        ? `easy pass moving to vetted (${rawGutDetail})`
         : creator.teamTake === 'Maybe'
-        ? `coin toss maybe bc of the brand flag lmk what you think`
-        : `total slam dunk ${pronouns.subjectLower} basically wrote our pitch for us`;
+        ? `coin toss maybe bc of the brand flag (${rawGutDetail}) lmk what you think`
+        : `total slam dunk ${pronouns.subjectLower} basically wrote our pitch for us (${rawGutDetail})`;
     overallDraft = `${storiesNote} — ${gutDraft}`;
-
-    commentDraft =
-      creator.teamTake === 'Not a fit'
-        ? `${storiesNote} for ten mins and ${pronouns.subjectLower} pretty much stopped doing book stuff so ${rawCrowd} moved on, ${tieShort}, no reason to pitch chromatics here gut says fast pass @Bree`
-        : `${storiesNote} and honestly ${pronouns.possessiveLower} readers are ${rawCrowd} who read on their phones instead of scrolling and ${pronouns.subjectLower} hates ai slop but loves good design (${rawApps}) with ${tieShort} so id quote ${pronouns.possessiveLower} line at ${primaryCitation.timestampLabel} in ${primaryTitle} (${primaryCitation.timestampedUrl}) and tell ${pronouns.objectLower} we made chromatics on iOS with color-coded lines and matched-up audio to fix that exact thing, gut says ${gutDraft} @Bree`;
   } else if (effectiveMode === 'hybrid-nyc-bree') {
-    // Mode 3: NYC + Bree Hybrid (Sara @bookish.victorian dash-bullet rhythm + loose NYC lowercase run-ons)
-    q1Watched = `${storiesNote}`;
-    q2Audience = `- ${pronouns.possessiveLower} readers are ${rawCrowd} who read on their phones during morning train rides instead of scrolling`;
-    q3Apps = `- ${pronouns.subjectLower} hates ai slop but loves good app design (${rawApps})`;
-    q4Ties = `- ${tieShort}`;
+    // Mode 3: NYC + Bree Hybrid (Sara @bookish.victorian Max Buck "fire" rhythm + creator-specific details)
+    const fireOpener =
+      creator.savedStoriesWatched && creator.savedStoriesWatched.length > 0
+        ? `${creator.mainLink} Is ${pronouns.possessiveLower} instagram page that I watched ${creator.savedStoriesWatched.length} of ${pronouns.possessiveLower} stories that are on ${pronouns.possessiveLower} profile saved - ${creator.savedStoriesWatched.join(', ')} .`
+        : `${primaryCitation.timestampedUrl} Is ${pronouns.possessiveLower} ${(w0?.platform || creator.platforms[0] || 'video').toLowerCase()} page that I watched ${primaryTitle} (at ${primaryCitation.timestampLabel})${
+            w1 && secondaryCitation
+              ? ` and "${w1.title}" (${secondaryCitation.timestampedUrl} at ${secondaryCitation.timestampLabel})`
+              : ''
+          } .`;
+    q1Watched = `${fireOpener} (${w0Topic})`;
+    q2Audience = `${pronouns.possessiveLower} readers are ${rawCrowd} who read on their phones during morning train rides instead of scrolling`;
+    q3Apps = `-${pronouns.subjectLower} hates ai slop but loves good app design (${rawApps})`;
+    q4Ties = `-${tieShort}`;
     q5Rec =
       creator.teamTake === 'Not a fit'
-        ? `- pass on chromatics since ${pronouns.subjectLower} pivoted off book content`
-        : `- yes on iOS, color-coded lines and matched-up audio fit ${pronouns.possessiveLower} exact classic book crowd`;
-    hookDraft = `- id quote ${pronouns.possessiveLower} moment at ${primaryCitation.timestampLabel} in ${primaryTitle} (${primaryCitation.timestampedUrl}) and tell ${pronouns.objectLower} we made chromatics on iOS with color-coded lines and matched-up audio to fix that exact thing`;
+        ? `-pass on chromatics since ${pronouns.subjectLower} pivoted off book content (${rawRecDetail})`
+        : `-yes on iOS, color-coded lines and matched-up audio fit ${pronouns.possessiveLower} exact crowd (${rawRecDetail})`;
+    hookDraft = `-i'd quote ${pronouns.possessiveLower} line at ${primaryCitation.timestampLabel} in ${primaryTitle} (${primaryCitation.timestampedUrl}) and tell ${pronouns.objectLower} we made chromatics on iOS with color-coded lines and matched-up audio to fix that exact thing.`;
     gutDraft =
       creator.teamTake === 'Not a fit'
-        ? `- gut says clean pass, moving to vetted`
+        ? `gut says clean pass, moving to vetted (${rawGutDetail})`
         : creator.teamTake === 'Maybe'
-        ? `- gut says coin toss maybe bc of the brand tie, worth a soft test dm`
-        : `- gut says total slam dunk, ${pronouns.subjectLower} basically wrote our pitch for us`;
-    overallDraft = `${storiesNote} — ${gutDraft.replace(/^- /, '')}`;
-
-    commentDraft = `${storiesNote}
-- ${pronouns.possessiveLower} readers are ${rawCrowd} who read on their phones during morning train rides instead of scrolling,
--${pronouns.subjectLower} hates ai slop but loves good app design (${rawApps}), -${tieShort}.
--id quote ${pronouns.possessiveLower} line at ${primaryCitation.timestampLabel} in ${primaryTitle} (${primaryCitation.timestampedUrl}) and tell ${pronouns.objectLower} we made chromatics on iOS with color-coded lines and matched-up audio to fix that exact thing.
-${gutDraft} @Bree`;
+        ? `gut says coin toss maybe bc of the brand tie (${rawGutDetail}), worth a soft test dm`
+        : `gut says total slam dunk, ${pronouns.subjectLower} basically wrote our pitch for us (${rawGutDetail})`;
+    overallDraft = `${fireOpener} — ${gutDraft}`;
   } else {
-    // Mode 1: 20-Something NYC (2 casual paragraphs with timestamped URL citations)
-    const baseNyc = buildNotionBreeComment(
-      creator.name,
-      creator.vettingDossier,
-      creator.teamTake,
-      creator.handle,
-      {
-        forceRebuildFromDossier: Boolean(options?.allowReferenceOverride),
-        rawPastedTextToConvert: options?.rawPastedTextToConvert
-      }
-    );
-    q1Watched = `${storiesNote}`;
-    q2Audience = `${pronouns.possessiveLower} crowd is ${rawCrowd} who read on their phones and iPads`;
+    // Mode 1: 20-Something NYC
+    q1Watched = `${storiesNote} — ${w0Topic}`;
+    q2Audience = `${pronouns.possessiveLower} crowd is ${rawCrowd} (${creator.followersCount} followers, ${creator.avgEngagementRate} eng) who read on their phones and iPads`;
     q3Apps = `${rawApps}, zero tolerance for ai slop`;
     q4Ties = `${tieShort}`;
     q5Rec =
       creator.teamTake === 'Not a fit'
-        ? `skip — pivoted off books`
-        : `yes, chromatics color-coded dialogue and matched-up audio on iOS fit ${pronouns.possessiveLower} readers`;
+        ? `skip — pivoted off books (${rawRecDetail})`
+        : `yes, chromatics color-coded dialogue and matched-up audio on iOS fit ${pronouns.possessiveLower} readers (${rawRecDetail})`;
     hookDraft = `dm ${pronouns.objectLower} citing ${primaryTitle} (${primaryCitation.timestampedUrl} at ${primaryCitation.timestampLabel}) and show how chromatics color-codes who is talking on iOS`;
     gutDraft =
       creator.teamTake === 'Not a fit'
-        ? `easy pass, moving to vetted`
+        ? `easy pass, moving to vetted (${rawGutDetail})`
         : creator.teamTake === 'Maybe'
-        ? `keep as a maybe bc of the brand link`
-        : `super easy yes, really natural fit`;
+        ? `keep as a maybe bc of the brand link (${rawGutDetail})`
+        : `super easy yes, really natural fit (${rawGutDetail})`;
     overallDraft = `${storiesNote} — ${gutDraft}`;
-    commentDraft = baseNyc;
   }
 
   const forceFatigue = Boolean(options?.allowReferenceOverride && creator.rank <= 3);
-  return {
-    formattedNotionComment: applyRankFatigueTypos(commentDraft, creator.rank, effectiveMode, forceFatigue),
+  const formattedDossierFields = {
     overallSummary: applyRankFatigueTypos(overallDraft, creator.rank, effectiveMode, forceFatigue),
     watchedOrRead: applyRankFatigueTypos(q1Watched, creator.rank, effectiveMode, forceFatigue),
     audienceProfile: applyRankFatigueTypos(q2Audience, creator.rank, effectiveMode, forceFatigue),
@@ -1296,6 +1494,23 @@ ${gutDraft} @Bree`;
     recommendChromaticsWhy: applyRankFatigueTypos(q5Rec, creator.rank, effectiveMode, forceFatigue),
     outreachLeadHook: applyRankFatigueTypos(hookDraft, creator.rank, effectiveMode, forceFatigue),
     gutFeeling: applyRankFatigueTypos(gutDraft, creator.rank, effectiveMode, forceFatigue)
+  };
+
+  const commentDraft = buildShrunkConcatenatedCommentTemplate(
+    creator,
+    {
+      ...sourceDossier,
+      ...formattedDossierFields,
+      formattedNotionComment: ''
+    },
+    effectiveMode,
+    bulletFormat,
+    { forceFatigueOnReference: forceFatigue }
+  );
+
+  return {
+    formattedNotionComment: commentDraft,
+    ...formattedDossierFields
   };
 }
 
@@ -1457,7 +1672,7 @@ export const INITIAL_40_CREATORS = [
     toneOverride: 'reference-locked' as const,
     savedStoriesWatched: ['book II', 'collaborations', 'book reviews'],
     bossCritiqueNote:
-      'Gold-Standard Casual Human Reference (#3): Watched 3 saved IG highlight stories (book II, collaborations, book reviews) on @bookish.victorian and wrote a punchy, lowercase, human reaction instead of stiff AI headers.',
+      'Gold-Standard Casual Human Reference (#3 — Marked as "FIRE" by Boss Max Buck): Watched 3 saved IG highlight stories (book II, collaborations, book reviews) on @bookish.victorian and wrote the exact unedited human reaction Max Buck praised as fire.',
     name: 'Sara',
     handle: '@bookish.victorian',
     niche: 'Victorian Classics, Design-Forward Digital Reading & Saved IG Story Book Reviews',
@@ -3714,6 +3929,9 @@ export const INITIAL_40_CREATORS = [
   }
 
   if (c.vettingDossier.watchedOrRead) {
+    // Save original rich creator-specific baseline dossier so switching tones never loses creator-specific details
+    (c as any).baselineDossier = { ...c.vettingDossier };
+
     const structuredComment = buildStructuredResearchComment(
       c.name,
       c.vettingDossier,
@@ -3722,28 +3940,20 @@ export const INITIAL_40_CREATORS = [
     );
     (c.vettingDossier as any).structuredResearchComment = structuredComment;
 
-    if (c.rank <= 3) {
-      const refComment =
-        c.rank === 1
-          ? AIDA_NYC_COMMENT
-          : c.rank === 2
-          ? TRICIA_NYC_COMMENT
-          : SARA_REFERENCE_COMMENT;
-      (c.vettingDossier as any).humanWatchComment = refComment;
-      c.vettingDossier.formattedNotionComment = refComment;
-    } else {
-      const styled = formatCreatorNoteByTone(c as unknown as CreatorRecord, 'hybrid-nyc-bree');
-      c.vettingDossier.overallSummary = styled.overallSummary;
-      c.vettingDossier.watchedOrRead = styled.watchedOrRead;
-      c.vettingDossier.audienceProfile = styled.audienceProfile;
-      c.vettingDossier.readingAppsEreadersAndAI = styled.readingAppsEreadersAndAI;
-      c.vettingDossier.competitorTiesAnalysis = styled.competitorTiesAnalysis;
-      c.vettingDossier.recommendChromaticsWhy = styled.recommendChromaticsWhy;
-      c.vettingDossier.outreachLeadHook = styled.outreachLeadHook;
-      c.vettingDossier.gutFeeling = styled.gutFeeling;
-      (c.vettingDossier as any).humanWatchComment = styled.formattedNotionComment;
-      c.vettingDossier.formattedNotionComment = styled.formattedNotionComment;
-    }
+    const styled = formatCreatorNoteByTone(c as unknown as CreatorRecord, 'hybrid-nyc-bree', {
+      allowReferenceOverride: true,
+      bulletFormat: 'numbered-and-dashes'
+    });
+    c.vettingDossier.overallSummary = styled.overallSummary;
+    c.vettingDossier.watchedOrRead = styled.watchedOrRead;
+    c.vettingDossier.audienceProfile = styled.audienceProfile;
+    c.vettingDossier.readingAppsEreadersAndAI = styled.readingAppsEreadersAndAI;
+    c.vettingDossier.competitorTiesAnalysis = styled.competitorTiesAnalysis;
+    c.vettingDossier.recommendChromaticsWhy = styled.recommendChromaticsWhy;
+    c.vettingDossier.outreachLeadHook = styled.outreachLeadHook;
+    c.vettingDossier.gutFeeling = styled.gutFeeling;
+    (c.vettingDossier as any).humanWatchComment = styled.formattedNotionComment;
+    c.vettingDossier.formattedNotionComment = styled.formattedNotionComment;
   }
   return c;
 }) as unknown as CreatorRecord[];

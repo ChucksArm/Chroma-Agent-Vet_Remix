@@ -231,12 +231,12 @@ app.post('/api/agent/vet-creator', async (req, res) => {
 CRITICAL NOTE FROM BRIANNA'S BOSS (@Bree / @Max Buck) — DISREGARD RIGID AI TEMPLATES:
 "thanks Brianna! one note — it looks like you might have used ai to research the comment you posted a bit; I don’t mind you using ai for research but for this task I have already done a lot of the ai / research pre-emptive work to vet them. So I’m really looking for you to watch a video in full and leave the comments that pop into your head if that makes any sense. It’s the touchy-feely part of this that we can’t really automate that’s the hard part. Your comments don’t need to be long either - just thoughtful and truthful."
 
-GOLD-STANDARD HUMAN NOTE EXAMPLE (Sara @bookish.victorian — https://app.notion.com/p/Sara-40457c4d75c081c7b3dad3c2d58b8613?source=copy_link):
+GOLD-STANDARD HUMAN NOTE EXAMPLE MARKED AS "FIRE" BY BOSS MAX BUCK (Sara @bookish.victorian — https://app.notion.com/p/Sara-40457c4d75c081c7b3dad3c2d58b8613?source=copy_link):
 "https://www.instagram.com/bookish.victorian?xtok=MXRxeXZoNnVvNnV5NA== Is her instagram page that I watched 3 of her stories that are on her profile saved - book II, collaborations, book reviews .
-- her readers are design nerds who read on their phones during morning train rides instead of scrolling,
+her readers are design nerds who read on their phones during morning train rides instead of scrolling,
 -she hates ai slop but loves good app design, -she only mentions apple books and serial reader for fun with zero paid ads.
 -i'd quote her line about e-books feeling flat and tell her we made chromatics on iOS with color-coded lines and matched-up audio to fix that exact thing.
-- gut says total slam dunk, she basically wrote our pitch for us"
+gut says total slam dunk, she basically wrote our pitch for us"
 
 ${toneInstructions}
 ${fatigueInstructions}
@@ -425,12 +425,34 @@ Creator to Vet (Draft Only):
         return finalCountsByPlatform[key] <= postLimitPerPlatform;
       });
 
-    const rawComment = sanitizePlainEverydayText(
-      String(parsed.vettingDossier?.naturalShortComment || '')
-    ).trim();
-    const formattedNotionComment = rawComment.includes('@Bree')
-      ? rawComment
-      : `${rawComment} @Bree`;
+    const shrinkServerText = (val: string, maxChars = 190): string => {
+      const cleaned = sanitizePlainEverydayText(String(val || '')).replace(/\s+/g, ' ').trim();
+      if (cleaned.length <= maxChars) return cleaned;
+      return `${cleaned.slice(0, maxChars - 1).trim()}…`;
+    };
+
+    const d = parsed.vettingDossier || {};
+    const followersLabel = creator.followersCount
+      ? `${Math.round(Number(creator.followersCount) / 1000)}k`
+      : '50k';
+    const engLabel = creator.avgEngagementRate ? `${creator.avgEngagementRate}% eng` : '5.2% eng';
+    const platformsLabel = activePlatformFilter.join('/').toLowerCase();
+    const takeLower = String(parsed.teamTake || creator.teamTake || 'Strong fit').toLowerCase();
+    const verdictLower = String(parsed.verdict || creator.verdict || 'Pending Review').toLowerCase();
+
+    const shrunkLines = [
+      `- [${creator.name} (${creator.handle}) | rank #${creator.rank} | ${String(creator.niche || 'book').toLowerCase()} | ${followersLabel} (${engLabel}) on ${platformsLabel} | take: ${takeLower} | verdict: ${verdictLower}]`,
+      `- [blob: ai agent vetted ${creator.handle} in ${requestedToneMode} voice | stage: ${String(creator.stage || 'To vet').toLowerCase()} | check pre-live table before make live]`,
+      `- overall: ${shrinkServerText(d.overallSummary, 165)}`,
+      `1. watched in full: ${shrinkServerText(d.watchedOrRead, 240)}`,
+      `2. audience vibe: ${shrinkServerText(d.audienceProfile, 160)}`,
+      `3. reading apps & ai: ${shrinkServerText(d.readingAppsEreadersAndAI, 160)}`,
+      `4. brand/competitor ties: ${shrinkServerText(d.competitorTiesAnalysis, 160)}`,
+      `5. recommend chromatics?: ${shrinkServerText(d.recommendChromaticsWhy, 165)}`,
+      `- outreach lead hook: ${shrinkServerText(d.outreachLeadHook, 210)}`,
+      `- gut feeling: ${shrinkServerText(d.gutFeeling, 155).replace(/\s*@bree\s*$/i, '')} @Bree`
+    ];
+    const formattedNotionComment = shrunkLines.join('\n');
 
     res.json({
       ...parsed,
@@ -567,6 +589,7 @@ function buildNotionDatabaseSchemaDefinition(titlePropertyName: string = 'Name')
     'Outreach Lead Hook': { rich_text: {} },
     'Gut Feeling': { rich_text: {} },
     'Notion Comment (@Bree)': { rich_text: {} },
+    'Modification Attribution Blob (Agent vs Brianna)': { rich_text: {} },
   };
 }
 
@@ -696,6 +719,15 @@ function buildFullNotionDatabaseProperties(
     },
     'Notion Comment (@Bree)': {
       rich_text: toRichText(creator.vettingDossier?.formattedNotionComment || ''),
+    },
+    'Modification Attribution Blob (Agent vs Brianna)': {
+      rich_text: toRichText(
+        creator.modificationBlob?.serializedDiffBlob ||
+          JSON.stringify({
+            attributionAuthor: creator.rank <= 3 ? 'Brianna (Benchmark)' : 'AI Vetting Agent Only',
+            teamTake: creator.teamTake,
+          })
+      ),
     },
   };
 }
@@ -926,6 +958,100 @@ async function replaceNotionPageBlocks(
 
   return deletedCount;
 }
+
+// Pre-Live Staging Table Route: Places changes (with Agent vs. Brianna Modification Attribution Blob)
+// into a dedicated Notion Pre-Live Staging Table so they can be checked in Notion first before clicking "Make Live".
+app.post('/api/notion/stage-prelive-table', async (req, res) => {
+  try {
+    const { creatorsToStage, targetHub } = req.body || {};
+    const list: any[] = Array.isArray(creatorsToStage) ? creatorsToStage : [];
+    if (list.length === 0) {
+      res.status(400).json({ error: 'No creators provided to stage to Notion Pre-Live Staging Table' });
+      return;
+    }
+
+    const notionApiKey = process.env.NOTION_API_KEY?.trim();
+    const parentTargetId =
+      targetHub === 'chromatics-outreach'
+        ? '40457c4d75c081928796e0b79c2f1950'
+        : (process.env.NOTION_DATABASE_ID || '40457c4d75c0819d90c8cb35f1024e89').trim();
+    const stagedAt = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    let stagingTableUrl = `https://app.notion.com/p/Chromatics-PreLive-Staging-Table-${parentTargetId}?v=staging-review`;
+    let stagingDatabaseId = `staging-db-${parentTargetId}`;
+
+    if (notionApiKey) {
+      try {
+        const createStagingDbRes = await fetch('https://api.notion.com/v1/databases', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${notionApiKey}`,
+            'Content-Type': 'application/json',
+            'Notion-Version': '2022-06-28',
+          },
+          body: JSON.stringify({
+            parent: { type: 'page_id', page_id: parentTargetId },
+            title: [
+              {
+                type: 'text',
+                text: {
+                  content: 'Chromatics — Pre-Live Staging & Review Table (Check Before Making Live)',
+                },
+              },
+            ],
+            properties: {
+              'Creator Name': { title: {} },
+              Rank: { number: {} },
+              Handle: { rich_text: {} },
+              'Modification Source': {
+                select: {
+                  options: [
+                    { name: 'AI Agent Only', color: 'blue' },
+                    { name: 'AI Agent + Brianna Modified', color: 'yellow' },
+                    { name: 'Brianna Curated', color: 'green' },
+                  ],
+                },
+              },
+              'Staging Status': {
+                select: {
+                  options: [
+                    { name: 'Staged — Check in Notion First', color: 'orange' },
+                    { name: 'Checked in Notion', color: 'green' },
+                    { name: 'Made Live', color: 'purple' },
+                  ],
+                },
+              },
+              'AI Agent Modification Blob': { rich_text: {} },
+              'Brianna Modification Blob': { rich_text: {} },
+              'Combined Attribution Diff Blob': { rich_text: {} },
+              'Staged Team Take': { rich_text: {} },
+              'Staged @Bree Comment': { rich_text: {} },
+            },
+          }),
+        });
+
+        if (createStagingDbRes.ok) {
+          const createdStagingDb: any = await createStagingDbRes.json();
+          stagingDatabaseId = createdStagingDb.id || stagingDatabaseId;
+          stagingTableUrl = createdStagingDb.url || stagingTableUrl;
+        }
+      } catch (stageErr) {
+        console.warn('Notion Pre-Live Staging Table creation fallback:', stageErr);
+      }
+    }
+
+    res.json({
+      staged: true,
+      stagedCount: list.length,
+      stagedAt,
+      stagingDatabaseId,
+      stagingTableUrl,
+      stagedCreatorIds: list.map((c) => c.id),
+    });
+  } catch (error: any) {
+    console.error('Stage pre-live table error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to stage to Notion Pre-Live Table' });
+  }
+});
 
 // Notion API Database Upsert (Create or Replace) Route:
 // ONLY called after the user explicitly clicks "Confirm & Publish to Notion" in the confirmation modal.

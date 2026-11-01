@@ -24,7 +24,12 @@ import {
   X,
   Moon,
   Sun,
-  Zap
+  Zap,
+  BarChart3,
+  Smartphone,
+  GitCompare,
+  Bot,
+  UserCheck
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -45,7 +50,8 @@ import {
   VettingQuestionsConfig,
   NotionWorkspaceScanResult,
   SocialPlatformType,
-  ProjectToneMode
+  ProjectToneMode,
+  CommentBulletFormat
 } from './types';
 import {
   INITIAL_40_CREATORS,
@@ -62,16 +68,26 @@ import {
   AGENT_DB_SCHEMA_COLUMNS,
   formatCreatorForDatabaseRow,
   buildNotionBreeComment,
+  buildShrunkConcatenatedCommentTemplate,
   formatCreatorNoteByTone,
   parseRawLongTemplateNote,
   getHighestViewedPostThumbnail
 } from './data/initialCreators';
 import GoogleSheetsNotionBridge from './components/GoogleSheetsNotionBridge';
 import MobileQuickVettingView from './components/MobileQuickVettingView';
+import PerformanceDashboard from './components/PerformanceDashboard';
+import PreLiveStagingTableView, {
+  NOTION_PRELIVE_STAGING_TABLE_URL,
+  buildCreatorAttributionBlob,
+  recordAgentModificationOnCreator,
+  recordBriannaModificationOnCreator
+} from './components/PreLiveStagingTableView';
 
 type ActiveWorkspaceView =
   | 'workspace-scanner'
   | 'notion-desk'
+  | 'performance-dashboard'
+  | 'prelive-staging'
   | 'spreadsheet'
   | 'competitor-radar'
   | 'boss-questions';
@@ -94,10 +110,21 @@ interface PendingPublishModalState {
 }
 
 export default function App() {
-  const [creators, setCreators] = useState<CreatorRecord[]>(INITIAL_40_CREATORS);
+  const [creators, setCreators] = useState<CreatorRecord[]>(() =>
+    INITIAL_40_CREATORS.map((c) => ({
+      ...c,
+      modificationBlob: buildCreatorAttributionBlob(c, 'hybrid-nyc-bree'),
+      preLiveStagingStatus: c.notionSyncStatus === 'synced' ? 'live' : 'in-staging-table'
+    }))
+  );
   const [selectedCreatorId, setSelectedCreatorId] = useState<string>('chr-03');
   const [projectToneMode, setProjectToneMode] = useState<ProjectToneMode>('hybrid-nyc-bree');
+  const [commentBulletFormat, setCommentBulletFormat] =
+    useState<CommentBulletFormat>('numbered-and-dashes');
   const [activeView, setActiveView] = useState<ActiveWorkspaceView>('notion-desk');
+  const [isPushingStaging, setIsPushingStaging] = useState<boolean>(false);
+  const [isMakingLive, setIsMakingLive] = useState<boolean>(false);
+  const [stagingTableUrl, setStagingTableUrl] = useState<string>(NOTION_PRELIVE_STAGING_TABLE_URL);
   const [notionTab, setNotionTab] = useState<NotionTabFilter>('first-ten');
   const [spreadsheetSubTab, setSpreadsheetSubTab] = useState<SpreadsheetSubTab>('table-27-cols');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -148,6 +175,30 @@ export default function App() {
       // ignore storage errors
     }
   }, [isQuickVettingMode]);
+
+  // Automatic Mobile Device & Viewport Detection + Manual Mobile Preview Toggle
+  const [isMobileDevice, setIsMobileDevice] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+      navigator.userAgent || ''
+    );
+    return uaMobile || window.innerWidth < 768;
+  });
+  const [forceMobilePreview, setForceMobilePreview] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const checkMobile = () => {
+      const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+        navigator.userAgent || ''
+      );
+      setIsMobileDevice(uaMobile || window.innerWidth < 768);
+    };
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
+  const showMobileExperience = isMobileDevice || forceMobilePreview;
 
   // Database 27-Column Schema Formatting State
   const [isDbFormatted, setIsDbFormatted] = useState<boolean>(true);
@@ -213,18 +264,22 @@ export default function App() {
     }, 4500);
   };
 
-  // Switch Global Project Tone across Ranks #4-#40 immediately (leaving Ranks #1-#3 locked as Reference Benchmarks unless overridden)
+  // Switch Global Project Tone across all 40 creators immediately (rewriting the shrunk-down Q&A + info blobs comment template in the user's chosen tone)
   const handleSwitchGlobalProjectTone = (nextMode: ProjectToneMode) => {
     setProjectToneMode(nextMode);
     setCreators((prev) =>
       prev.map((c) => {
-        if (c.rank <= 3 && (!c.toneOverride || c.toneOverride === 'reference-locked')) {
-          return c;
-        }
-        const rewritten = formatCreatorNoteByTone(c, nextMode, {
-          allowReferenceOverride: c.rank <= 3 && c.toneOverride !== 'reference-locked'
+        const targetMode: ProjectToneMode =
+          c.toneOverride &&
+          c.toneOverride !== 'global' &&
+          c.toneOverride !== 'reference-locked'
+            ? c.toneOverride
+            : nextMode;
+        const rewritten = formatCreatorNoteByTone(c, targetMode, {
+          allowReferenceOverride: true,
+          bulletFormat: commentBulletFormat
         });
-        return {
+        const updated: CreatorRecord = {
           ...c,
           vettingDossier: {
             ...c.vettingDossier,
@@ -240,12 +295,52 @@ export default function App() {
             formattedNotionComment: rewritten.formattedNotionComment
           }
         };
+        return recordAgentModificationOnCreator(
+          updated,
+          targetMode,
+          `AI Agent rewrote shrunk-down concatenated Q&A + info blobs template in "${targetMode}" voice with Rank #${c.rank} fatigue curve`
+        );
       })
     );
     const modeLabel = PROJECT_TONE_MODES.find((m) => m.id === nextMode)?.label || nextMode;
     triggerToast(
-      `Switched Project Tone to "${modeLabel}" — Rewrote Ranks #4–#40 with progressive late-list fatigue (#27–#40) & intact URLs/timestamps (Ranks #1–#3 preserved as Reference Benchmarks).`
+      `Switched Project Tone to "${modeLabel}" — Rewrote all 40 creators' shrunk-down Q&A + info blobs comments in "${modeLabel}" voice.`
     );
+  };
+
+  // Switch the numbered / '-' dash bullet format across all 40 creators' comments
+  const handleSwitchCommentBulletFormat = (nextFormat: CommentBulletFormat) => {
+    setCommentBulletFormat(nextFormat);
+    setCreators((prev) =>
+      prev.map((c) => {
+        const activeMode: ProjectToneMode =
+          c.toneOverride &&
+          c.toneOverride !== 'global' &&
+          c.toneOverride !== 'reference-locked'
+            ? c.toneOverride
+            : projectToneMode;
+        const rebuiltComment = buildShrunkConcatenatedCommentTemplate(
+          c,
+          c.vettingDossier,
+          activeMode,
+          nextFormat
+        );
+        return {
+          ...c,
+          vettingDossier: {
+            ...c.vettingDossier,
+            humanWatchComment: rebuiltComment,
+            formattedNotionComment: rebuiltComment
+          }
+        };
+      })
+    );
+    const labelMap: Record<CommentBulletFormat, string> = {
+      'numbered-and-dashes': "1–5 Numbered Q&A + '-' Dashes",
+      'dashes-only': "All '-' Dashes",
+      'numbered-only': 'All Numbered Bullet Points'
+    };
+    triggerToast(`Updated all 40 creator comments to "${labelMap[nextFormat]}" template format.`);
   };
 
   // Override tone for a single creator (including optionally testing overrides on Ranks #1-#3 or relocking them)
@@ -265,9 +360,10 @@ export default function App() {
             ? projectToneMode
             : overrideMode;
         const rewritten = formatCreatorNoteByTone(updatedCreator, targetMode, {
-          allowReferenceOverride: overrideMode !== 'reference-locked' && overrideMode !== 'global'
+          allowReferenceOverride: overrideMode !== 'reference-locked',
+          bulletFormat: commentBulletFormat
         });
-        return {
+        const nextRecord: CreatorRecord = {
           ...updatedCreator,
           vettingDossier: {
             ...updatedCreator.vettingDossier,
@@ -283,6 +379,13 @@ export default function App() {
             formattedNotionComment: rewritten.formattedNotionComment
           }
         };
+        return recordBriannaModificationOnCreator(
+          c,
+          nextRecord,
+          ['Per-Creator Tone Override', 'Notion Comment (@Bree)', 'Q1–Q5 Dossier Answers'],
+          `Brianna overrode #${c.rank} ${c.name}'s voice to "${overrideMode}"`,
+          targetMode
+        );
       })
     );
     const targetCreator = creators.find((c) => c.id === creatorId);
@@ -293,7 +396,7 @@ export default function App() {
         ? `Follow Global (${PROJECT_TONE_MODES.find((m) => m.id === projectToneMode)?.label || projectToneMode})`
         : PROJECT_TONE_MODES.find((m) => m.id === overrideMode)?.label || overrideMode;
     triggerToast(
-      `Updated ${targetCreator?.name || 'Creator'} (#${targetCreator?.rank || ''}) voice to "${label}".`
+      `Updated ${targetCreator?.name || 'Creator'} (#${targetCreator?.rank || ''}) voice to "${label}" (Brianna Modification Blob recorded in Pre-Live Table).`
     );
   };
 
@@ -567,15 +670,22 @@ export default function App() {
           ? creator.toneOverride
           : projectToneMode;
 
-      const updatedRecord: CreatorRecord =
-        creator.rank <= 3 && (!creator.toneOverride || creator.toneOverride === 'reference-locked')
-          ? rawUpdatedRecord
-          : {
-              ...rawUpdatedRecord,
-              vettingDossier: formatCreatorNoteByTone(rawUpdatedRecord, activeCreatorTone, {
-                allowReferenceOverride: creator.rank <= 3,
-              }),
-            };
+      const baseUpdatedRecord: CreatorRecord = {
+        ...rawUpdatedRecord,
+        baselineDossier: rawUpdatedRecord.vettingDossier,
+        vettingDossier: formatCreatorNoteByTone(rawUpdatedRecord, activeCreatorTone, {
+          allowReferenceOverride: true,
+          bulletFormat: commentBulletFormat,
+        }),
+      };
+
+      const updatedRecord = recordAgentModificationOnCreator(
+        baseUpdatedRecord,
+        activeCreatorTone,
+        isQuickVettingMode
+          ? `AI Agent Quick Vetting (3 recent posts/platform across [${selectedPlatforms.join(', ')}])`
+          : `AI Agent 25m Deep Vetting Audit across [${selectedPlatforms.join(', ')}]`
+      );
 
       setCreators((prev) => prev.map((c) => (c.id === creator.id ? updatedRecord : c)));
 
@@ -584,8 +694,8 @@ export default function App() {
       } else {
         triggerToast(
           isQuickVettingMode
-            ? `Quick-vetted ${creator.name} (3 recent posts/platform · NYC voice staged for @Bree).`
-            : `Audited ${creator.name} across [${selectedPlatforms.join(', ')}] (@Bree comment staged).`
+            ? `Quick-vetted ${creator.name} (AI Agent Blob placed in Pre-Live Staging Table).`
+            : `Audited ${creator.name} across [${selectedPlatforms.join(', ')}] (AI Agent Blob placed in Pre-Live Staging Table).`
         );
       }
 
@@ -657,28 +767,194 @@ export default function App() {
     triggerToast('Copied 27-Column Notion Database Schema JSON blueprint to clipboard!');
   };
 
-  // Execute Notion Database Create/Update ONLY after user clicks "Confirm & Publish to Notion" inside the modal
-  const handleConfirmedPublishToNotion = async () => {
-    if (!pendingPublishModal) return;
-    setIsPublishingConfirmed(true);
+  // Step 1 of Pre-Live Gate: Push changes + Modification Attribution Blobs to the Notion Pre-Live Staging Table first
+  const handlePushToNotionStagingTable = async (creatorsToStage: CreatorRecord[]) => {
+    if (!creatorsToStage.length) return;
+    setIsPushingStaging(true);
+    try {
+      const response = await fetch('/api/notion/stage-prelive-table', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          creators: creatorsToStage.map((c) => ({
+            ...c,
+            modificationBlob:
+              c.modificationBlob || buildCreatorAttributionBlob(c, projectToneMode),
+          })),
+          selectedPlatforms,
+        }),
+      });
 
-    const { creatorsToPublish, targetHub } = pendingPublishModal;
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to push rows to Notion Pre-Live Staging Table');
+      }
+
+      const pushedAt =
+        data.stagedAt || new Date().toISOString().replace('T', ' ').substring(0, 16);
+      const tableUrl = data.notionStagingTableUrl || NOTION_PRELIVE_STAGING_TABLE_URL;
+      setStagingTableUrl(tableUrl);
+
+      const stagedIds = new Set(creatorsToStage.map((c) => c.id));
+      setCreators((prev) =>
+        prev.map((c) => {
+          if (!stagedIds.has(c.id)) return c;
+          return {
+            ...c,
+            preLiveStagingStatus: 'pushed-to-notion-staging',
+            notionStagingTableUrl: tableUrl,
+            notionStagingPushedAt: pushedAt,
+            modificationBlob:
+              c.modificationBlob || buildCreatorAttributionBlob(c, projectToneMode),
+          };
+        })
+      );
+
+      if (pendingPublishModal) {
+        setPendingPublishModal((prev) =>
+          prev
+            ? {
+                ...prev,
+                creatorsToPublish: prev.creatorsToPublish.map((c) => ({
+                  ...c,
+                  preLiveStagingStatus: 'pushed-to-notion-staging',
+                  notionStagingTableUrl: tableUrl,
+                  notionStagingPushedAt: pushedAt,
+                  modificationBlob:
+                    c.modificationBlob || buildCreatorAttributionBlob(c, projectToneMode),
+                })),
+              }
+            : null
+        );
+      }
+
+      triggerToast(
+        `Placed ${creatorsToStage.length} creator(s) + Attribution Blobs (AI Agent vs Brianna) into the Notion Pre-Live Staging Table. Check them in Notion first, then mark Checked to unlock "Make Live"!`
+      );
+    } catch (err: any) {
+      triggerToast(`Pre-Live Staging error: ${err?.message}`);
+    } finally {
+      setIsPushingStaging(false);
+    }
+  };
+
+  // Step 2 of Pre-Live Gate: Confirm row(s) have been checked in the Notion Pre-Live Staging Table
+  const handleToggleCheckedInNotionStaging = (creatorId: string, checked: boolean) => {
+    setCreators((prev) =>
+      prev.map((c) => {
+        if (c.id !== creatorId) return c;
+        return {
+          ...c,
+          notionStagingCheckedByBrianna: checked,
+          preLiveStagingStatus: checked ? 'checked-in-notion' : 'pushed-to-notion-staging',
+        };
+      })
+    );
+    if (pendingPublishModal) {
+      setPendingPublishModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              creatorsToPublish: prev.creatorsToPublish.map((c) =>
+                c.id === creatorId
+                  ? {
+                      ...c,
+                      notionStagingCheckedByBrianna: checked,
+                      preLiveStagingStatus: checked
+                        ? 'checked-in-notion'
+                        : 'pushed-to-notion-staging',
+                    }
+                  : c
+              ),
+            }
+          : null
+      );
+    }
+  };
+
+  const handleMarkAllCheckedInNotionStaging = (creatorIds: string[], checked: boolean) => {
+    const idSet = new Set(creatorIds);
+    setCreators((prev) =>
+      prev.map((c) => {
+        if (!idSet.has(c.id)) return c;
+        return {
+          ...c,
+          notionStagingCheckedByBrianna: checked,
+          preLiveStagingStatus: checked
+            ? 'checked-in-notion'
+            : c.notionStagingPushedAt
+            ? 'pushed-to-notion-staging'
+            : 'in-staging-table',
+          notionStagingTableUrl: c.notionStagingTableUrl || stagingTableUrl,
+          notionStagingPushedAt:
+            c.notionStagingPushedAt ||
+            new Date().toISOString().replace('T', ' ').substring(0, 16),
+        };
+      })
+    );
+    if (pendingPublishModal) {
+      setPendingPublishModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              creatorsToPublish: prev.creatorsToPublish.map((c) =>
+                idSet.has(c.id)
+                  ? {
+                      ...c,
+                      notionStagingCheckedByBrianna: checked,
+                      preLiveStagingStatus: checked
+                        ? 'checked-in-notion'
+                        : 'pushed-to-notion-staging',
+                      notionStagingTableUrl: c.notionStagingTableUrl || stagingTableUrl,
+                      notionStagingPushedAt:
+                        c.notionStagingPushedAt ||
+                        new Date().toISOString().replace('T', ' ').substring(0, 16),
+                    }
+                  : c
+              ),
+            }
+          : null
+      );
+    }
+    triggerToast(
+      checked
+        ? `Confirmed ${creatorIds.length} staged row(s) checked in Notion Pre-Live Staging Table — "Make Live" is now unlocked!`
+        : `Unchecked ${creatorIds.length} row(s) in Pre-Live Staging Table.`
+    );
+  };
+
+  // Step 3 of Pre-Live Gate: Click "Make Live" (Only executes after rows are checked in Notion Pre-Live Staging Table)
+  const handleMakeLiveInProductionNotion = async (creatorsToMakeLive: CreatorRecord[]) => {
+    const verifiedRows = creatorsToMakeLive.filter(
+      (c) => c.notionStagingCheckedByBrianna || c.preLiveStagingStatus === 'checked-in-notion'
+    );
+    if (verifiedRows.length === 0) {
+      triggerToast(
+        'Hold on! Before anything is made live, place the changes in the Pre-Live Staging Table and check them in Notion first.'
+      );
+      return;
+    }
+
+    setIsMakingLive(true);
+    setIsPublishingConfirmed(true);
     const todayDate = new Date().toISOString().split('T')[0];
-    const totalCount = creatorsToPublish.length;
+    const nowTime = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const totalCount = verifiedRows.length;
+    const targetHub = pendingPublishModal?.targetHub || 'my-contacts-desk';
 
     setSyncProgress({
       current: 0,
       total: totalCount,
-      currentName: 'Initializing 27-column database synchronization...',
+      currentName: 'Making verified Notion Staging rows LIVE in production...',
     });
 
     try {
       for (let i = 0; i < totalCount; i++) {
-        const creator = creatorsToPublish[i];
+        const creator = verifiedRows[i];
         setSyncProgress({
           current: i + 1,
           total: totalCount,
-          currentName: `Syncing ${creator.name} (#${creator.rank})...`,
+          currentName: `Making LIVE: ${creator.name} (#${creator.rank})...`,
         });
 
         setCreators((prev) =>
@@ -693,6 +969,8 @@ export default function App() {
               ...creator,
               stage: 'Vetted',
               vettedDate: creator.vettedDate || todayDate,
+              modificationBlob:
+                creator.modificationBlob || buildCreatorAttributionBlob(creator, projectToneMode),
             },
             targetHub,
             selectedPlatforms,
@@ -702,7 +980,7 @@ export default function App() {
         });
 
         if (!response.ok) {
-          throw new Error(`Failed to publish ${creator.name}`);
+          throw new Error(`Failed to make ${creator.name} live`);
         }
 
         const data = await response.json();
@@ -715,6 +993,8 @@ export default function App() {
                   stage: 'Vetted',
                   vettedDate: c.vettedDate || todayDate,
                   notionSyncStatus: 'synced',
+                  preLiveStagingStatus: 'live',
+                  madeLiveAt: nowTime,
                   notionPageId: data.notionPageId || c.notionPageId,
                   notionSyncOperation: data.operation || 'created',
                   notionLastSyncedAt: data.notionLastSyncedAt,
@@ -729,15 +1009,22 @@ export default function App() {
       setPendingPublishModal(null);
       triggerToast(
         totalCount === 1
-          ? `Notion Database entry updated for ${creatorsToPublish[0].name} (All 27 Agent columns + @Bree comment synced).`
-          : `Synchronized ${totalCount} creator entries across all 27 Notion Database columns (@Bree notified).`
+          ? `MADE LIVE: ${verifiedRows[0].name} is now live in Notion DB (with Agent vs. Brianna Attribution Blob + @Bree comment).`
+          : `MADE LIVE: ${totalCount} checked creators promoted from Pre-Live Staging Table to Live Notion DB!`
       );
     } catch (err: any) {
-      triggerToast(`Publish error: ${err?.message}`);
+      triggerToast(`Make Live error: ${err?.message}`);
     } finally {
+      setIsMakingLive(false);
       setIsPublishingConfirmed(false);
       setSyncProgress(null);
     }
+  };
+
+  // Execute Notion Database Create/Update ONLY after user checks the Pre-Live Staging Table in Notion and clicks "Make Live"
+  const handleConfirmedPublishToNotion = async () => {
+    if (!pendingPublishModal) return;
+    await handleMakeLiveInProductionNotion(pendingPublishModal.creatorsToPublish);
   };
 
   // Batch Draft-Vet Next 5 Unvetted Creators across `selectedPlatforms`, then open Pre-Publish Modal for Notion DB sync
@@ -869,6 +1156,13 @@ export default function App() {
           (updates.vettingDossier.formattedNotionComment !== undefined ||
             updates.vettingDossier.humanWatchComment !== undefined);
 
+        const activeCreatorTone: ProjectToneMode =
+          c.toneOverride &&
+          c.toneOverride !== 'global' &&
+          c.toneOverride !== 'reference-locked'
+            ? c.toneOverride
+            : projectToneMode;
+
         if (explicitCommentProvided) {
           // Directly REPLACE the comment with the new text (never overwrite or append)
           const replacementComment =
@@ -878,30 +1172,121 @@ export default function App() {
           nextDossier.formattedNotionComment = replacementComment;
           nextDossier.humanWatchComment = replacementComment;
         } else if (
-          nextDossier.watchedOrRead &&
-          (updates.vettingDossier !== undefined || updates.teamTake !== undefined)
+          updates.vettingDossier !== undefined ||
+          updates.teamTake !== undefined ||
+          updates.verdict !== undefined
         ) {
-          // Rebuild and REPLACE the @Bree comment from the updated 5 answers
-          const rebuilt = buildNotionBreeComment(
-            c.name,
+          // Rebuild and REPLACE the shrunk-down concatenated numbered / '-' dash @Bree comment from the updated sections & blobs
+          const tempCreator: CreatorRecord = {
+            ...c,
+            ...updates,
+            teamTake: nextTeamTake,
+            vettingDossier: nextDossier,
+          };
+          const rebuilt = buildShrunkConcatenatedCommentTemplate(
+            tempCreator,
             nextDossier,
-            nextTeamTake,
-            c.handle,
-            { forceRebuildFromDossier: true }
+            activeCreatorTone,
+            commentBulletFormat,
+            {
+              attributionSummary: `brianna edited ${c.handle} dossier (${activeCreatorTone})`
+            }
           );
           nextDossier.formattedNotionComment = rebuilt;
           nextDossier.humanWatchComment = rebuilt;
         }
 
-        return {
+        const changedFieldsList: string[] = [];
+        if (updates.verdict !== undefined && updates.verdict !== c.verdict) {
+          changedFieldsList.push(`Verdict (${updates.verdict})`);
+        }
+        if (updates.stage !== undefined && updates.stage !== c.stage) {
+          changedFieldsList.push(`Stage (${updates.stage})`);
+        }
+        if (updates.teamTake !== undefined && updates.teamTake !== c.teamTake) {
+          changedFieldsList.push(`Team take (${updates.teamTake})`);
+        }
+        if (updates.flagNote !== undefined && updates.flagNote !== c.flagNote) {
+          changedFieldsList.push('Flag Note');
+        }
+        if (updates.vettingDossier) {
+          if (
+            updates.vettingDossier.formattedNotionComment !== undefined &&
+            updates.vettingDossier.formattedNotionComment !== c.vettingDossier.formattedNotionComment
+          ) {
+            changedFieldsList.push('Notion Comment (@Bree)');
+          }
+          if (
+            updates.vettingDossier.overallSummary !== undefined &&
+            updates.vettingDossier.overallSummary !== c.vettingDossier.overallSummary
+          ) {
+            changedFieldsList.push('Overall Summary');
+          }
+          if (
+            updates.vettingDossier.watchedOrRead !== undefined &&
+            updates.vettingDossier.watchedOrRead !== c.vettingDossier.watchedOrRead
+          ) {
+            changedFieldsList.push('Q1: Watched/Read');
+          }
+          if (
+            updates.vettingDossier.audienceProfile !== undefined &&
+            updates.vettingDossier.audienceProfile !== c.vettingDossier.audienceProfile
+          ) {
+            changedFieldsList.push('Q2: Audience Profile');
+          }
+          if (
+            updates.vettingDossier.readingAppsEreadersAndAI !== undefined &&
+            updates.vettingDossier.readingAppsEreadersAndAI !== c.vettingDossier.readingAppsEreadersAndAI
+          ) {
+            changedFieldsList.push('Q3: Apps & AI Stance');
+          }
+          if (
+            updates.vettingDossier.competitorTiesAnalysis !== undefined &&
+            updates.vettingDossier.competitorTiesAnalysis !== c.vettingDossier.competitorTiesAnalysis
+          ) {
+            changedFieldsList.push('Q4: Competitor Ties');
+          }
+          if (
+            updates.vettingDossier.recommendChromaticsWhy !== undefined &&
+            updates.vettingDossier.recommendChromaticsWhy !== c.vettingDossier.recommendChromaticsWhy
+          ) {
+            changedFieldsList.push('Q5: Recommend Chromatics');
+          }
+          if (
+            updates.vettingDossier.outreachLeadHook !== undefined &&
+            updates.vettingDossier.outreachLeadHook !== c.vettingDossier.outreachLeadHook
+          ) {
+            changedFieldsList.push('Outreach Lead Hook');
+          }
+          if (
+            updates.vettingDossier.gutFeeling !== undefined &&
+            updates.vettingDossier.gutFeeling !== c.vettingDossier.gutFeeling
+          ) {
+            changedFieldsList.push('Gut Feeling');
+          }
+        }
+        if (changedFieldsList.length === 0) {
+          changedFieldsList.push('Dossier Edit');
+        }
+
+        const rawNext: CreatorRecord = {
           ...c,
           ...updates,
           stage: nextStage,
           vettedDate: nextVettedDate,
           teamTake: nextTeamTake,
+          baselineDossier: nextDossier,
           vettingDossier: nextDossier,
           notionSyncStatus: 'unsynced',
         };
+
+        return recordBriannaModificationOnCreator(
+          c,
+          rawNext,
+          changedFieldsList,
+          `Brianna edited ${changedFieldsList.join(', ')} in Notion Desk`,
+          projectToneMode
+        );
       })
     );
   };
@@ -930,7 +1315,7 @@ export default function App() {
       creator.handle
     );
 
-    const updatedRecord: CreatorRecord = {
+    const rawUpdatedRecord: CreatorRecord = {
       ...creator,
       status: 'completed',
       teamTake: 'Not a fit',
@@ -938,9 +1323,17 @@ export default function App() {
       vettingDossier: updatedDossier,
     };
 
+    const updatedRecord = recordBriannaModificationOnCreator(
+      creator,
+      rawUpdatedRecord,
+      ['Team take (Not a fit)', '10m Fast-Fail Rule', 'Notion Comment (@Bree)'],
+      'Brianna triggered 10-minute fast-fail rule (Not a fit)',
+      projectToneMode
+    );
+
     setCreators((prev) => prev.map((c) => (c.id === creator.id ? updatedRecord : c)));
     triggerToast(
-      `Staged ${creator.name} as "Not a fit" (10m fast-fail draft). Click "Review & Publish" to sync to Notion.`
+      `Staged ${creator.name} as "Not a fit" (Brianna Modification Blob placed in Pre-Live Staging Table).`
     );
   };
 
@@ -1163,7 +1556,11 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#FAF9F5] text-slate-900 flex flex-col">
       {/* Top Bar Contract: Zone 1 (Brand) — Zone 2 (5 Single-Line Nav Links) — Zone 3 (1 Primary Action) */}
-      <header className="sticky top-0 z-30 flex items-center justify-between gap-8 px-6 py-3.5 bg-[#FAF9F5]/95 backdrop-blur border-b border-stone-200">
+      <header
+        className={`${
+          showMobileExperience ? 'hidden' : 'hidden md:flex'
+        } sticky top-0 z-30 items-center justify-between gap-8 px-6 py-3.5 bg-[#FAF9F5]/95 backdrop-blur border-b border-stone-200`}
+      >
         <a
           href="#top"
           onClick={(e) => {
@@ -1197,6 +1594,28 @@ export default function App() {
             2. Notion Desk
           </button>
           <button
+            onClick={() => setActiveView('performance-dashboard')}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer flex items-center gap-1.5 ${
+              activeView === 'performance-dashboard'
+                ? 'border-slate-900 text-slate-900 font-semibold'
+                : 'border-transparent hover:text-slate-900'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5 text-indigo-600" />
+            <span>3. Performance Dashboard</span>
+          </button>
+          <button
+            onClick={() => setActiveView('prelive-staging')}
+            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer flex items-center gap-1.5 ${
+              activeView === 'prelive-staging'
+                ? 'border-slate-900 text-slate-900 font-semibold'
+                : 'border-transparent hover:text-slate-900'
+            }`}
+          >
+            <GitCompare className="w-3.5 h-3.5 text-fuchsia-600" />
+            <span>4. Pre-Live Staging &amp; Blobs</span>
+          </button>
+          <button
             onClick={() => setActiveView('spreadsheet')}
             className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer flex items-center gap-1.5 ${
               activeView === 'spreadsheet'
@@ -1205,7 +1624,7 @@ export default function App() {
             }`}
           >
             <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
-            <span>3. Google Sheets &amp; Notion DB</span>
+            <span>5. Sheets &amp; Notion DB</span>
           </button>
           <button
             onClick={() => setActiveView('competitor-radar')}
@@ -1469,238 +1888,353 @@ export default function App() {
         </div>
       )}
 
-      {/* MANDATORY PRE-PUBLISH CONFIRMATION MODAL GATE (Notion Database Create / Update Upsert) */}
-      {pendingPublishModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white border border-stone-200 rounded-2xl max-w-3xl w-full overflow-hidden shadow-xl flex flex-col max-h-[90vh]">
-            <div className="px-6 py-4 bg-stone-50 border-b border-stone-200 flex items-center justify-between gap-4">
-              <div className="flex items-center gap-2.5">
-                <Database className="w-5 h-5 text-indigo-600 shrink-0" />
-                <div>
-                  <h2 className="font-display text-base font-bold text-slate-900">
-                    Confirm Before Creating / Updating 27-Column Notion Database Entries
-                  </h2>
-                  <p className="text-xs text-slate-600">
-                    Ask-First Safety Gate: Review all 27 formatted database columns, relevant social links, 5 answers, and{' '}
-                    <code className="font-mono bg-stone-200/80 px-1 py-0.5 rounded">@Bree</code> comment before syncing to Notion.
-                  </p>
-                </div>
-              </div>
-              <button
-                onClick={() => setPendingPublishModal(null)}
-                className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
-                aria-label="Close confirmation dialog"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      {/* MANDATORY PRE-LIVE STAGING TABLE & MAKE LIVE GATE MODAL */}
+      {pendingPublishModal && (() => {
+        const modalCreators = pendingPublishModal.creatorsToPublish.map(
+          (mc) => creators.find((c) => c.id === mc.id) || mc
+        );
+        const primaryCreator = modalCreators[0];
+        const primaryBlob =
+          primaryCreator?.modificationBlob ||
+          (primaryCreator ? buildCreatorAttributionBlob(primaryCreator, projectToneMode) : null);
+        const allCheckedInNotion = modalCreators.every(
+          (c) => c.notionStagingCheckedByBrianna || c.preLiveStagingStatus === 'checked-in-notion'
+        );
+        const checkedCount = modalCreators.filter(
+          (c) => c.notionStagingCheckedByBrianna || c.preLiveStagingStatus === 'checked-in-notion'
+        ).length;
 
-            <div className="p-6 overflow-y-auto space-y-5 text-xs">
-              {/* Target Notion Destination Selector */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="block font-semibold text-slate-800">
-                    Select Target Notion Database / Workspace Hub
-                  </label>
-                  <span className="font-mono text-[11px] text-emerald-700 font-semibold">
-                    DB Schema Formatted: 27 / 27 Agent Columns Ready
-                  </span>
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white border border-stone-200 rounded-2xl max-w-4xl w-full overflow-hidden shadow-xl flex flex-col max-h-[92vh]">
+              <div className="px-6 py-4 bg-stone-50 border-b border-stone-200 flex items-center justify-between gap-4">
+                <div className="flex items-center gap-2.5">
+                  <GitCompare className="w-5 h-5 text-indigo-600 shrink-0" />
+                  <div>
+                    <h2 className="font-display text-base font-bold text-slate-900">
+                      Pre-Live Notion Staging Table &amp; Attribution Blob Gate (Check in Notion Before &ldquo;Make Live&rdquo;)
+                    </h2>
+                    <p className="text-xs text-slate-600">
+                      Before anything is made live, changes &amp; <strong>Modification Attribution Blobs (AI Agent vs. Brianna)</strong> are placed in the Notion Pre-Live Staging Table and checked in Notion first before clicking <strong>Make Live</strong>.
+                    </p>
+                  </div>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPendingPublishModal({
-                        ...pendingPublishModal,
-                        targetHub: 'my-contacts-desk',
-                      })
-                    }
-                    className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
-                      pendingPublishModal.targetHub === 'my-contacts-desk'
-                        ? 'border-slate-900 bg-stone-100/90'
-                        : 'border-stone-200 hover:bg-stone-50'
-                    }`}
-                  >
-                    <div className="font-semibold text-slate-900">
-                      My Contacts Database (To vet &rarr; Vetted)
-                    </div>
-                    <div className="font-mono text-[11px] text-slate-500 truncate mt-0.5">
-                      40457c4d75c0819d90c8cb35f1024e89
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setPendingPublishModal({
-                        ...pendingPublishModal,
-                        targetHub: 'chromatics-outreach',
-                      })
-                    }
-                    className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
-                      pendingPublishModal.targetHub === 'chromatics-outreach'
-                        ? 'border-slate-900 bg-stone-100/90'
-                        : 'border-stone-200 hover:bg-stone-50'
-                    }`}
-                  >
-                    <div className="font-semibold text-slate-900">Chromatics Outreach Database</div>
-                    <div className="font-mono text-[11px] text-slate-500 truncate mt-0.5">
-                      Chromatics-Outreach-40457c4d75c081928796e0b79c2f1950
-                    </div>
-                  </button>
-                </div>
+                <button
+                  onClick={() => setPendingPublishModal(null)}
+                  className="text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+                  aria-label="Close confirmation dialog"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
-              {/* Creators & Upsert Operation Summary */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-800">
-                    Database Upsert Queue ({pendingPublishModal.creatorsToPublish.length} Creator
-                    {pendingPublishModal.creatorsToPublish.length > 1 ? 's' : ''})
-                  </span>
-                  <span className="font-mono text-[11px] text-slate-500">
-                    Writes All 27 Agent Properties + Page Blocks + @Bree Comment
-                  </span>
-                </div>
-
-                <div className="border border-stone-200 rounded-xl divide-y divide-stone-200 max-h-40 overflow-y-auto">
-                  {pendingPublishModal.creatorsToPublish.map((c) => (
-                    <div
-                      key={c.id}
-                      className="px-3.5 py-2.5 flex items-center justify-between gap-3 bg-white"
+              <div className="p-6 overflow-y-auto space-y-5 text-xs">
+                {/* 3-Step Pre-Live Staging Gate Banner inside Modal */}
+                <div className="p-4 rounded-xl bg-amber-50/90 border border-amber-200 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-display font-bold text-amber-950 text-xs flex items-center gap-1.5">
+                      <ShieldCheck className="w-4 h-4 text-amber-700" />
+                      <span>Mandatory Pre-Live Notion Table Verification Workflow</span>
+                    </span>
+                    <a
+                      href={stagingTableUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[11px] font-semibold text-indigo-700 hover:underline inline-flex items-center gap-1"
                     >
-                      <div className="min-w-0">
-                        <span className="font-mono text-slate-400 mr-2">#{c.rank}</span>
-                        <span className="font-semibold text-slate-900">{c.name}</span>
-                        <span className="text-slate-500 ml-1.5">{c.handle}</span>
-                        <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                          Main link: {c.mainLink}
-                        </div>
+                      <span>Open Notion Pre-Live Staging Table</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <button
+                      type="button"
+                      onClick={() => handlePushToNotionStagingTable(modalCreators)}
+                      disabled={isPushingStaging}
+                      className="p-2.5 rounded-lg bg-white border border-indigo-200 hover:bg-indigo-50 text-left transition-colors cursor-pointer"
+                    >
+                      <div className="font-bold text-indigo-900 flex items-center justify-between">
+                        <span>Step 1: Place in Notion Staging Table</span>
+                        <Database className="w-3.5 h-3.5 text-indigo-600" />
                       </div>
-                      <div className="flex items-center gap-2 text-[11px] shrink-0">
-                        <span className="font-mono text-indigo-700">
-                          {c.notionPageId ? 'Update 27 Columns' : 'Create 27 Columns'}
+                      <p className="text-[11px] text-slate-600 mt-0.5">
+                        {isPushingStaging
+                          ? 'Pushing rows + Attribution Blobs to Notion Staging Table...'
+                          : 'Push rows + AI Agent vs. Brianna Blobs to Notion Staging Table'}
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleMarkAllCheckedInNotionStaging(
+                          modalCreators.map((c) => c.id),
+                          !allCheckedInNotion
+                        )
+                      }
+                      className={`p-2.5 rounded-lg border text-left transition-colors cursor-pointer ${
+                        allCheckedInNotion
+                          ? 'bg-emerald-600 text-white border-emerald-600'
+                          : 'bg-white border-amber-300 hover:bg-amber-100/60 text-slate-900'
+                      }`}
+                    >
+                      <div className="font-bold flex items-center justify-between">
+                        <span>Step 2: Checked in Notion Table</span>
+                        <Check className="w-3.5 h-3.5" />
+                      </div>
+                      <p
+                        className={`text-[11px] mt-0.5 ${
+                          allCheckedInNotion ? 'text-emerald-100' : 'text-slate-600'
+                        }`}
+                      >
+                        {allCheckedInNotion
+                          ? `All ${modalCreators.length} row(s) verified in Notion! Ready to Make Live.`
+                          : `Click after checking in Notion (${checkedCount}/${modalCreators.length} checked)`}
+                      </p>
+                    </button>
+
+                    <div
+                      className={`p-2.5 rounded-lg border ${
+                        allCheckedInNotion
+                          ? 'bg-emerald-50 border-emerald-300 text-emerald-950'
+                          : 'bg-stone-100 border-stone-200 text-slate-500'
+                      }`}
+                    >
+                      <div className="font-bold flex items-center justify-between">
+                        <span>Step 3: Click &ldquo;Make Live&rdquo;</span>
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                      </div>
+                      <p className="text-[11px] mt-0.5">
+                        {allCheckedInNotion
+                          ? 'Unlocked! Click "Make Live" below to promote to production.'
+                          : 'Locked until Step 2 (Checked in Notion) is confirmed.'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Modification Attribution Blob Comparison (AI Agent vs Brianna) */}
+                {primaryCreator && primaryBlob && (
+                  <div className="p-4 rounded-xl border border-stone-200 bg-stone-50/80 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-bold text-slate-900">
+                          Modification Attribution Blob ({primaryCreator.name}):
                         </span>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-semibold text-slate-900">
-                          Team take: {c.teamTake}
-                        </span>
+                        {primaryBlob.lastModifiedBy === 'agent-and-brianna' ? (
+                          <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-fuchsia-100 text-fuchsia-900 border border-fuchsia-300 inline-flex items-center gap-1">
+                            <GitCompare className="w-3 h-3" />
+                            <span>AI Agent + Brianna Modified Blob</span>
+                          </span>
+                        ) : primaryBlob.lastModifiedBy === 'brianna' ? (
+                          <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-100 text-emerald-900 border border-emerald-300 inline-flex items-center gap-1">
+                            <UserCheck className="w-3 h-3" />
+                            <span>Brianna Modification Blob</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-indigo-100 text-indigo-900 border border-indigo-300 inline-flex items-center gap-1">
+                            <Bot className="w-3 h-3" />
+                            <span>AI Agent Modification Blob</span>
+                          </span>
+                        )}
+                      </div>
+                      <span className="font-mono text-[10px] text-slate-500">
+                        Blob ID: {primaryBlob.blobId}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="p-2.5 rounded-lg bg-indigo-50/70 border border-indigo-200 space-y-1">
+                        <div className="font-bold text-indigo-950 flex items-center gap-1 text-[11px]">
+                          <Bot className="w-3.5 h-3.5 text-indigo-700" />
+                          <span>AI Agent Modification</span>
+                        </div>
+                        <p className="text-[11px] text-slate-700">
+                          {primaryBlob.agentModificationSummary}
+                        </p>
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200 space-y-1">
+                        <div className="font-bold text-emerald-950 flex items-center gap-1 text-[11px]">
+                          <UserCheck className="w-3.5 h-3.5 text-emerald-700" />
+                          <span>Brianna&rsquo;s Modification</span>
+                        </div>
+                        <p className="text-[11px] text-slate-700">
+                          {primaryBlob.briannaModified
+                            ? primaryBlob.briannaModificationSummary
+                            : 'No manual override by Brianna yet (100% AI Agent draft).'}
+                        </p>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </div>
 
-              {/* 27 Formatted Notion Database Columns Preview for Primary Creator */}
-              {pendingPublishModal.creatorsToPublish[0] && (
-                <div className="space-y-1.5">
+                    <div className="p-2 rounded bg-slate-900 text-emerald-300 font-mono text-[10px] overflow-x-auto whitespace-nowrap">
+                      {primaryBlob.serializedDiffBlob}
+                    </div>
+                  </div>
+                )}
+
+                {/* Creators & Pre-Live Check List */}
+                <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="font-semibold text-slate-800">
-                      Formatted 27-Column Database Row Payload (
-                      {pendingPublishModal.creatorsToPublish[0].name})
+                      Pre-Live Staging Queue ({modalCreators.length} Creator
+                      {modalCreators.length > 1 ? 's' : ''})
                     </span>
-                    <span className="font-mono text-[11px] text-slate-500">
-                      27 Notion Properties Mapped
-                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPendingPublishModal(null);
+                        setActiveView('prelive-staging');
+                      }}
+                      className="text-[11px] font-semibold text-indigo-700 hover:underline cursor-pointer"
+                    >
+                      Open Full-Screen Pre-Live Staging Table &rarr;
+                    </button>
                   </div>
-                  <div className="border border-stone-200 rounded-xl max-h-44 overflow-y-auto divide-y divide-stone-100 bg-stone-50/60">
-                    {Object.entries(
-                      formatCreatorForDatabaseRow(
-                        pendingPublishModal.creatorsToPublish[0],
-                        selectedPlatforms
-                      )
-                    ).map(([colName, colValue]) => {
-                      const spec = AGENT_DB_SCHEMA_COLUMNS.find((s) => s.columnName === colName);
+
+                  <div className="border border-stone-200 rounded-xl divide-y divide-stone-200 max-h-44 overflow-y-auto">
+                    {modalCreators.map((c) => {
+                      const blob =
+                        c.modificationBlob || buildCreatorAttributionBlob(c, projectToneMode);
+                      const isChecked =
+                        c.notionStagingCheckedByBrianna ||
+                        c.preLiveStagingStatus === 'checked-in-notion';
                       return (
                         <div
-                          key={colName}
-                          className="px-3 py-1.5 grid grid-cols-12 gap-2 items-baseline text-[11px]"
+                          key={c.id}
+                          className="px-3.5 py-2.5 flex items-center justify-between gap-3 bg-white"
                         >
-                          <span className="col-span-4 font-semibold text-slate-800 truncate">
-                            {colName}
-                          </span>
-                          <span className="col-span-2 font-mono text-[10px] text-indigo-700">
-                            {spec?.notionType || 'rich_text'}
-                          </span>
-                          <span className="col-span-6 text-slate-600 line-clamp-1 font-mono">
-                            {colValue || '—'}
-                          </span>
+                          <div className="min-w-0">
+                            <span className="font-mono text-slate-400 mr-2">#{c.rank}</span>
+                            <span className="font-semibold text-slate-900">{c.name}</span>
+                            <span className="text-slate-500 ml-1.5">{c.handle}</span>
+                            <span className="ml-2 px-1.5 py-0.5 text-[10px] font-mono rounded bg-stone-100 text-slate-700 border border-stone-200">
+                              {blob.lastModifiedBy === 'agent-and-brianna'
+                                ? 'Agent + Brianna Blob'
+                                : blob.lastModifiedBy === 'brianna'
+                                ? 'Brianna Blob'
+                                : 'AI Agent Blob'}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleCheckedInNotionStaging(c.id, !isChecked)}
+                              className={`px-2.5 py-1 rounded font-semibold border cursor-pointer flex items-center gap-1 ${
+                                isChecked
+                                  ? 'bg-emerald-600 text-white border-emerald-600'
+                                  : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                              }`}
+                            >
+                              <Check className="w-3 h-3" />
+                              <span>{isChecked ? 'Checked in Notion' : 'Mark Checked in Notion'}</span>
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
                   </div>
                 </div>
+
+                {/* Exact @Bree Comment & 5 Answers Payload Preview */}
+                <div className="space-y-1.5">
+                  <span className="block font-semibold text-slate-800">
+                    Exact Notion Comment Preview (@Bree Notification · Max Buck &ldquo;Fire&rdquo; Benchmark Aligned)
+                  </span>
+                  <div className="p-3.5 rounded-xl bg-stone-50 border border-stone-200 font-mono text-[11px] text-slate-800 whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed">
+                    {primaryCreator?.vettingDossier.formattedNotionComment}
+                  </div>
+                </div>
+              </div>
+
+              {/* Visual Progress Bar during Synchronization */}
+              {syncProgress && (
+                <div className="px-6 py-3.5 bg-indigo-50/80 border-b border-indigo-100 space-y-2">
+                  <div className="flex items-center justify-between text-xs font-semibold text-indigo-950">
+                    <span className="truncate">{syncProgress.currentName}</span>
+                    <span className="font-mono tabular-nums shrink-0 ml-2">
+                      {syncProgress.current} / {syncProgress.total} (
+                      {Math.round((syncProgress.current / syncProgress.total) * 100)}%)
+                    </span>
+                  </div>
+                  <div className="w-full bg-indigo-200/70 h-2 rounded-full overflow-hidden">
+                    <div
+                      className="bg-indigo-600 h-full transition-all duration-300 ease-out rounded-full"
+                      style={{
+                        width: `${Math.max(
+                          4,
+                          (syncProgress.current / syncProgress.total) * 100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+                </div>
               )}
 
-              {/* Exact @Bree Comment & 5 Answers Payload Preview */}
-              <div className="space-y-1.5">
-                <span className="block font-semibold text-slate-800">
-                  Exact Notion Comment Preview (@Bree Notification)
-                </span>
-                <div className="p-3.5 rounded-xl bg-stone-50 border border-stone-200 font-mono text-[11px] text-slate-800 whitespace-pre-wrap max-h-44 overflow-y-auto leading-relaxed">
-                  {pendingPublishModal.creatorsToPublish[0]?.vettingDossier.formattedNotionComment}
+              <div className="px-6 py-4 bg-stone-50 border-t border-stone-200 flex flex-wrap items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => handlePushToNotionStagingTable(modalCreators)}
+                  disabled={isPushingStaging || isPublishingConfirmed}
+                  className="px-3.5 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  <span>1. Place in Notion Pre-Live Staging Table</span>
+                </button>
+
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setPendingPublishModal(null)}
+                    disabled={isPublishingConfirmed}
+                    className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-stone-300 rounded-lg hover:bg-stone-100 transition-colors cursor-pointer"
+                  >
+                    Keep in Pre-Live Staging
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmedPublishToNotion}
+                    disabled={isPublishingConfirmed || !allCheckedInNotion}
+                    title={
+                      !allCheckedInNotion
+                        ? 'Check the rows in the Notion Pre-Live Staging Table first (Step 2) to unlock Make Live'
+                        : 'Make verified changes live in production Notion DB'
+                    }
+                    className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 ${
+                      allCheckedInNotion
+                        ? 'text-white bg-emerald-600 hover:bg-emerald-700 cursor-pointer shadow-xs'
+                        : 'text-slate-400 bg-stone-200 border border-stone-300 cursor-not-allowed'
+                    }`}
+                  >
+                    {isPublishingConfirmed ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Making Live in Notion DB...</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-3.5 h-3.5" />
+                        <span>
+                          {allCheckedInNotion
+                            ? `3. Make Live (${modalCreators.length} Checked in Notion)`
+                            : 'Check in Notion First to Unlock "Make Live"'}
+                        </span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
-            </div>
-
-            {/* Visual Progress Bar during Synchronization */}
-            {syncProgress && (
-              <div className="px-6 py-3.5 bg-indigo-50/80 border-b border-indigo-100 space-y-2">
-                <div className="flex items-center justify-between text-xs font-semibold text-indigo-950">
-                  <span className="truncate">{syncProgress.currentName}</span>
-                  <span className="font-mono tabular-nums shrink-0 ml-2">
-                    {syncProgress.current} / {syncProgress.total} (
-                    {Math.round((syncProgress.current / syncProgress.total) * 100)}%)
-                  </span>
-                </div>
-                <div className="w-full bg-indigo-200/70 h-2 rounded-full overflow-hidden">
-                  <div
-                    className="bg-indigo-600 h-full transition-all duration-300 ease-out rounded-full"
-                    style={{
-                      width: `${Math.max(
-                        4,
-                        (syncProgress.current / syncProgress.total) * 100
-                      )}%`,
-                    }}
-                  />
-                </div>
-              </div>
-            )}
-
-            <div className="px-6 py-4 bg-stone-50 border-t border-stone-200 flex items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => setPendingPublishModal(null)}
-                disabled={isPublishingConfirmed}
-                className="px-4 py-2 text-xs font-medium text-slate-700 bg-white border border-stone-300 rounded-lg hover:bg-stone-100 transition-colors cursor-pointer"
-              >
-                Cancel (Keep as Local Draft)
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmedPublishToNotion}
-                disabled={isPublishingConfirmed}
-                className="px-4 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
-              >
-                {isPublishingConfirmed ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Formatting &amp; Syncing 27 Columns...</span>
-                  </>
-                ) : (
-                  <>
-                    <Check className="w-3.5 h-3.5" />
-                    <span>Confirm &amp; Sync All 27 Agent Fields to Notion DB (@Bree)</span>
-                  </>
-                )}
-              </button>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Contextual Workspace Header Strip */}
-      <section className="px-6 py-5 border-b border-stone-200 bg-white">
+      <section
+        className={`${
+          showMobileExperience ? 'hidden' : 'hidden md:block'
+        } px-6 py-5 border-b border-stone-200 bg-white`}
+      >
         <div className="max-w-[1440px] mx-auto flex flex-col gap-4">
           <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
             <div className="space-y-1">
@@ -1800,11 +2334,37 @@ export default function App() {
               <div className="h-8 w-px bg-stone-200 hidden sm:block" />
               <div className="flex flex-wrap items-center gap-2">
                 <button
+                  onClick={() => setActiveView('performance-dashboard')}
+                  className="px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+                >
+                  <BarChart3 className="w-3.5 h-3.5" />
+                  <span>Performance Dashboard (40)</span>
+                </button>
+                <button
+                  onClick={() => setActiveView('prelive-staging')}
+                  className="px-3.5 py-2 text-xs font-semibold text-white bg-fuchsia-700 hover:bg-fuchsia-800 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+                >
+                  <GitCompare className="w-3.5 h-3.5" />
+                  <span>Pre-Live Staging &amp; Blobs</span>
+                </button>
+                <button
                   onClick={() => setActiveView('spreadsheet')}
                   className="px-3.5 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5" />
                   <span>Google Sheets &amp; Create Notion DB</span>
+                </button>
+                <button
+                  onClick={() => setForceMobilePreview((prev) => !prev)}
+                  className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                    forceMobilePreview
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-stone-100 text-slate-700 border-stone-300 hover:bg-stone-200'
+                  }`}
+                  title="Preview the dedicated mobile view for all pages"
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>{forceMobilePreview ? 'Mobile View: Active' : 'Mobile View'}</span>
                 </button>
                 <button
                   onClick={() => handleFormatNotionDatabase('my-contacts-desk')}
@@ -1944,8 +2504,8 @@ export default function App() {
       </section>
 
       {/* Main Content Viewport */}
-      <main className="flex-1 max-w-[1440px] w-full mx-auto px-6 py-6">
-        {/* Mobile-Friendly Responsive Quick Vetting View & Sticky Bottom Nav */}
+      <main className="flex-1 max-w-[1440px] w-full mx-auto px-3 sm:px-6 py-4 sm:py-6">
+        {/* Mobile-Friendly Responsive Experience (automatically active whenever a mobile device accesses the pages or when Mobile View is toggled) */}
         <MobileQuickVettingView
           creators={creators}
           selectedCreatorId={selectedCreatorId}
@@ -1969,10 +2529,64 @@ export default function App() {
           projectToneMode={projectToneMode}
           onSwitchProjectTone={handleSwitchGlobalProjectTone}
           onOverrideCreatorTone={handleOverrideCreatorTone}
+          forceMobilePreview={forceMobilePreview}
+          onToggleMobilePreview={() => setForceMobilePreview((prev) => !prev)}
+          workspaceScan={workspaceScan}
+          onScanWorkspace={handleScanNotionWorkspace}
+          isScanningWorkspace={isScanningWorkspace}
+          questions={questions}
+          onUpdateQuestions={setQuestions}
+          onExportCSV={handleExportSpreadsheetCSV}
+          onProceedConflict={handleProceedAnywayConflict}
+          onArchiveConflict={handleArchiveConflict}
+          onUpdateCreatorField={handleUpdateCreatorField}
         />
 
-        {/* VIEW 0: FULL NOTION WORKSPACE SCANNER & REFERENCE INDEX */}
-        {activeView === 'workspace-scanner' && (
+        {/* Desktop Workspace Views (Hidden when accessed from a mobile device or when Mobile Preview is active) */}
+        {!showMobileExperience && (
+          <>
+            {/* VIEW: PERFORMANCE DASHBOARD (Engagement vs. Follower Counts across 40 Records) */}
+            {activeView === 'performance-dashboard' && (
+              <PerformanceDashboard
+                creators={creators}
+                selectedCreatorId={selectedCreatorId}
+                onSelectCreator={setSelectedCreatorId}
+                onOpenDossierInDesk={(c) => {
+                  setSelectedCreatorId(c.id);
+                  setActiveView('notion-desk');
+                }}
+                onCopyNotionComment={handleCopyNotionComment}
+                onRequestPublishConfirmation={(list) =>
+                  requestPublishConfirmation(list, 'my-contacts-desk')
+                }
+                copiedId={copiedId}
+              />
+            )}
+
+            {/* VIEW: PRE-LIVE NOTION STAGING TABLE & MODIFICATION ATTRIBUTION BLOBS (AI Agent vs. Brianna) */}
+            {activeView === 'prelive-staging' && (
+              <PreLiveStagingTableView
+                creators={creators}
+                selectedCreatorId={selectedCreatorId}
+                selectedPlatforms={selectedPlatforms}
+                projectToneMode={projectToneMode}
+                onSelectCreator={setSelectedCreatorId}
+                onOpenDossierInDesk={(c) => {
+                  setSelectedCreatorId(c.id);
+                  setActiveView('notion-desk');
+                }}
+                onPushToNotionStagingTable={handlePushToNotionStagingTable}
+                onToggleCheckedInNotion={handleToggleCheckedInNotionStaging}
+                onMarkAllCheckedInNotion={handleMarkAllCheckedInNotionStaging}
+                onMakeLive={handleMakeLiveInProductionNotion}
+                isPushingStaging={isPushingStaging}
+                isMakingLive={isMakingLive}
+                stagingTableUrl={stagingTableUrl}
+              />
+            )}
+
+            {/* VIEW 0: FULL NOTION WORKSPACE SCANNER & REFERENCE INDEX */}
+            {activeView === 'workspace-scanner' && (
           <div className="space-y-6">
             <div className="bg-white border border-stone-200 rounded-xl p-6 space-y-6">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-stone-200">
@@ -3024,6 +3638,115 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Modification Attribution Blob Card (Differentiates AI Agent's Modifications vs. Brianna's Modifications) */}
+                {(() => {
+                  const activeBlob =
+                    selectedCreator.modificationBlob ||
+                    buildCreatorAttributionBlob(selectedCreator, projectToneMode);
+                  const isCheckedInNotion =
+                    selectedCreator.notionStagingCheckedByBrianna ||
+                    selectedCreator.preLiveStagingStatus === 'checked-in-notion';
+                  return (
+                    <div className="p-4 rounded-xl border border-stone-200 bg-white space-y-3 shadow-2xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-display text-xs font-bold text-slate-900">
+                            Modification Attribution Blob (Agent vs. Brianna)
+                          </span>
+                          {activeBlob.lastModifiedBy === 'agent-and-brianna' ? (
+                            <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-fuchsia-100 text-fuchsia-900 border border-fuchsia-300 inline-flex items-center gap-1">
+                              <GitCompare className="w-3 h-3" />
+                              <span>Agent + Brianna Modified Blob</span>
+                            </span>
+                          ) : activeBlob.lastModifiedBy === 'brianna' ? (
+                            <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-emerald-100 text-emerald-900 border border-emerald-300 inline-flex items-center gap-1">
+                              <UserCheck className="w-3 h-3" />
+                              <span>Brianna Modification Blob</span>
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 text-[10px] font-bold rounded-md bg-indigo-100 text-indigo-900 border border-indigo-300 inline-flex items-center gap-1">
+                              <Bot className="w-3 h-3" />
+                              <span>AI Agent Modification Blob</span>
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setActiveView('prelive-staging')}
+                            className="px-2.5 py-1 text-[11px] font-semibold text-fuchsia-900 bg-fuchsia-50 hover:bg-fuchsia-100 border border-fuchsia-200 rounded-md cursor-pointer inline-flex items-center gap-1"
+                          >
+                            <GitCompare className="w-3 h-3" />
+                            <span>Open Pre-Live Staging Table</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleToggleCheckedInNotionStaging(
+                                selectedCreator.id,
+                                !isCheckedInNotion
+                              )
+                            }
+                            className={`px-2.5 py-1 text-[11px] font-semibold rounded-md border cursor-pointer inline-flex items-center gap-1 ${
+                              isCheckedInNotion
+                                ? 'bg-emerald-600 text-white border-emerald-600'
+                                : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                            }`}
+                          >
+                            <Check className="w-3 h-3" />
+                            <span>
+                              {isCheckedInNotion
+                                ? 'Checked in Notion Table'
+                                : 'Check in Notion First'}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
+                        <div className="p-2.5 rounded-lg bg-indigo-50/60 border border-indigo-200 space-y-1">
+                          <div className="font-bold text-indigo-950 flex items-center justify-between">
+                            <span className="inline-flex items-center gap-1">
+                              <Bot className="w-3.5 h-3.5 text-indigo-700" />
+                              <span>AI Agent&rsquo;s Modification</span>
+                            </span>
+                            <span className="font-mono text-[10px] text-indigo-700">
+                              {activeBlob.agentModifiedAt}
+                            </span>
+                          </div>
+                          <p className="text-slate-700 leading-relaxed">
+                            {activeBlob.agentModificationSummary}
+                          </p>
+                        </div>
+
+                        <div className="p-2.5 rounded-lg bg-emerald-50/60 border border-emerald-200 space-y-1">
+                          <div className="font-bold text-emerald-950 flex items-center justify-between">
+                            <span className="inline-flex items-center gap-1">
+                              <UserCheck className="w-3.5 h-3.5 text-emerald-700" />
+                              <span>Brianna&rsquo;s Modification</span>
+                            </span>
+                            <span className="font-mono text-[10px] text-emerald-700">
+                              {activeBlob.briannaModified
+                                ? activeBlob.briannaModifiedAt
+                                : 'No manual edits yet'}
+                            </span>
+                          </div>
+                          <p className="text-slate-700 leading-relaxed">
+                            {activeBlob.briannaModified
+                              ? activeBlob.briannaModificationSummary
+                              : 'Unmodified by Brianna — currently using AI Agent baseline output.'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="p-2 rounded bg-slate-900 text-emerald-300 font-mono text-[10px] overflow-x-auto whitespace-nowrap">
+                        {activeBlob.serializedDiffBlob}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Notion Comment Box (Tags @Bree Only) */}
                 <div className="space-y-2.5">
                   <div className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 text-xs text-slate-800 space-y-1">
@@ -3049,16 +3772,55 @@ export default function App() {
                     </p>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2">
                     <div>
                       <h3 className="font-display text-sm font-bold text-slate-900">
-                        Brianna&rsquo;s @Bree Notion Comment (Replace Mode &middot; Active Tone + Rank #{selectedCreator.rank} Fatigue)
+                        Brianna&rsquo;s @Bree Notion Comment (Shrunk-Down Concatenated Q&amp;A + Info Blobs &middot; Rank #{selectedCreator.rank} Fatigue)
                       </h3>
                       <p className="text-xs text-slate-500">
-                        Replaces existing Notion page blocks &amp; <code className="font-mono">@Bree</code> comment cell in-place (never appends). Paste any long bulleted note below and click <strong>Rewrite in Active Tone</strong> to convert it.
+                        Concatenated, shrunk-down copy of all Structured Vetting Sections (1&ndash;5 numbered bullet points + <code className="font-mono">-</code> dashes + creator &amp; attribution info blobs) rewritten in your selected tone. Edits below or in the sections update in real time.
                       </p>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                      <div className="inline-flex items-center rounded-lg border border-stone-300 bg-white p-0.5 text-[11px]">
+                        <button
+                          type="button"
+                          onClick={() => handleSwitchCommentBulletFormat('numbered-and-dashes')}
+                          className={`px-2 py-1 rounded-md font-semibold cursor-pointer transition-colors ${
+                            commentBulletFormat === 'numbered-and-dashes'
+                              ? 'bg-slate-900 text-white'
+                              : 'text-slate-600 hover:bg-stone-100'
+                          }`}
+                          title="Numbered 1-5 questions with '-' dash info blobs"
+                        >
+                          1&ndash;5 + &lsquo;-&rsquo; Dashes
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSwitchCommentBulletFormat('dashes-only')}
+                          className={`px-2 py-1 rounded-md font-semibold cursor-pointer transition-colors ${
+                            commentBulletFormat === 'dashes-only'
+                              ? 'bg-slate-900 text-white'
+                              : 'text-slate-600 hover:bg-stone-100'
+                          }`}
+                          title="Format all lines with '-' dashes"
+                        >
+                          All &lsquo;-&rsquo; Dashes
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSwitchCommentBulletFormat('numbered-only')}
+                          className={`px-2 py-1 rounded-md font-semibold cursor-pointer transition-colors ${
+                            commentBulletFormat === 'numbered-only'
+                              ? 'bg-slate-900 text-white'
+                              : 'text-slate-600 hover:bg-stone-100'
+                          }`}
+                          title="Format all lines as numbered bullet points"
+                        >
+                          All Numbered
+                        </button>
+                      </div>
+
                       <button
                         onClick={() => {
                           const currentBoxText =
@@ -3099,16 +3861,20 @@ export default function App() {
                               : projectToneMode;
 
                           const formattedDossier = formatCreatorNoteByTone(
-                            { ...selectedCreator, vettingDossier: mergedDossier },
+                            {
+                              ...selectedCreator,
+                              baselineDossier: mergedDossier,
+                              vettingDossier: mergedDossier,
+                            },
                             activeMode,
-                            { allowReferenceOverride: true }
+                            { allowReferenceOverride: true, bulletFormat: commentBulletFormat }
                           );
 
                           handleUpdateCreatorField(selectedCreator.id, {
                             vettingDossier: formattedDossier,
                           });
                           triggerToast(
-                            `Rewrote ${selectedCreator.name}'s comment & 5 answers in ${
+                            `Rewrote ${selectedCreator.name}'s shrunk-down Q&A + info blobs comment in ${
                               PROJECT_TONE_MODES.find((m) => m.id === activeMode)?.label
                             } (Rank #${selectedCreator.rank} fatigue applied, URLs/timestamps intact)!`
                           );
@@ -3139,7 +3905,7 @@ export default function App() {
                   </div>
 
                   <textarea
-                    rows={5}
+                    rows={11}
                     value={selectedCreator.vettingDossier.formattedNotionComment || ''}
                     onChange={(e) =>
                       handleUpdateCreatorField(selectedCreator.id, {
@@ -3150,7 +3916,7 @@ export default function App() {
                         },
                       })
                     }
-                    placeholder="Paste a long bulleted Notion note here or edit Brianna's 2-paragraph NYC @Bree comment..."
+                    placeholder="Shrunk-down concatenated Q&A + info blobs template (numbered 1-5 & '-' dashes)..."
                     className="w-full p-4 rounded-xl bg-stone-50 border border-stone-200 font-mono text-xs text-slate-800 leading-relaxed focus:outline-none focus:border-slate-900"
                   />
                 </div>
@@ -4018,6 +4784,8 @@ export default function App() {
               ))}
             </div>
           </div>
+        )}
+          </>
         )}
       </main>
     </div>
