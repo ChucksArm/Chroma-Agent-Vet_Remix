@@ -29,7 +29,9 @@ import {
   Smartphone,
   GitCompare,
   Bot,
-  UserCheck
+  UserCheck,
+  History,
+  RotateCcw
 } from 'lucide-react';
 import {
   ResponsiveContainer,
@@ -51,13 +53,19 @@ import {
   NotionWorkspaceScanResult,
   SocialPlatformType,
   ProjectToneMode,
-  CommentBulletFormat
+  CommentBulletFormat,
+  ChromaSyncableFieldKey,
+  FieldWriteStrategy
 } from './types';
 import {
   INITIAL_40_CREATORS,
   DEFAULT_VETTING_QUESTIONS,
   INITIAL_WORKSPACE_SCAN,
   NOTION_DESK_URL,
+  BRIANNAS_DESK_COLLAB_NOTION_ID,
+  BRIANNAS_DESK_COLLAB_NOTION_URL,
+  MAX_PRODUCTION_TABLE_ID,
+  MAX_PRODUCTION_TABLE_URL,
   CHROMATICS_OUTREACH_URL,
   AIDA_TEMPLATE_NOTION_URL,
   TRICIA_TEMPLATE_NOTION_URL,
@@ -71,13 +79,18 @@ import {
   buildShrunkConcatenatedCommentTemplate,
   formatCreatorNoteByTone,
   parseRawLongTemplateNote,
-  getHighestViewedPostThumbnail
+  getHighestViewedPostThumbnail,
+  formatChromaAgentSignature,
+  applyChromaSignatureAndWriteStrategy
 } from './data/initialCreators';
 import GoogleSheetsNotionBridge from './components/GoogleSheetsNotionBridge';
 import MobileQuickVettingView from './components/MobileQuickVettingView';
 import PerformanceDashboard from './components/PerformanceDashboard';
 import PreLiveStagingTableView, {
   NOTION_PRELIVE_STAGING_TABLE_URL,
+  ALL_SYNCABLE_FIELDS_META,
+  buildDefaultFieldSyncConfigs,
+  revertCreatorToVersion,
   buildCreatorAttributionBlob,
   recordAgentModificationOnCreator,
   recordBriannaModificationOnCreator
@@ -125,6 +138,23 @@ export default function App() {
   const [isPushingStaging, setIsPushingStaging] = useState<boolean>(false);
   const [isMakingLive, setIsMakingLive] = useState<boolean>(false);
   const [stagingTableUrl, setStagingTableUrl] = useState<string>(NOTION_PRELIVE_STAGING_TABLE_URL);
+  const [modalCheckedFieldsMap, setModalCheckedFieldsMap] = useState<
+    Record<ChromaSyncableFieldKey, boolean>
+  >(() =>
+    ALL_SYNCABLE_FIELDS_META.reduce((acc, item) => {
+      acc[item.fieldKey] = true;
+      return acc;
+    }, {} as Record<ChromaSyncableFieldKey, boolean>)
+  );
+  const [modalFieldStrategyMap, setModalFieldStrategyMap] = useState<
+    Record<ChromaSyncableFieldKey, FieldWriteStrategy>
+  >(() =>
+    ALL_SYNCABLE_FIELDS_META.reduce((acc, item) => {
+      acc[item.fieldKey] = 'append';
+      return acc;
+    }, {} as Record<ChromaSyncableFieldKey, FieldWriteStrategy>)
+  );
+  const [modalRevertVersionId, setModalRevertVersionId] = useState<string>('');
   const [notionTab, setNotionTab] = useState<NotionTabFilter>('first-ten');
   const [spreadsheetSubTab, setSpreadsheetSubTab] = useState<SpreadsheetSubTab>('table-27-cols');
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -262,6 +292,79 @@ export default function App() {
     setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 4500);
+  };
+
+  const handleNavigateToView = (nextView: ActiveWorkspaceView) => {
+    setActiveView(nextView);
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  // Revert a contact card back to a selected version snapshot before migrating checked fields to Max's Production Table
+  const handleRevertCreatorVersion = (creatorId: string, versionId: string) => {
+    let targetName = 'Creator';
+    let targetVersionLabel = versionId;
+    setCreators((prev) =>
+      prev.map((c) => {
+        if (c.id !== creatorId) return c;
+        targetName = c.name;
+        const foundVer = (c.versionHistory || []).find((v) => v.versionId === versionId);
+        if (foundVer) targetVersionLabel = foundVer.versionLabel;
+        return revertCreatorToVersion(c, versionId);
+      })
+    );
+    if (pendingPublishModal) {
+      setPendingPublishModal((prev) =>
+        prev
+          ? {
+              ...prev,
+              creatorsToPublish: prev.creatorsToPublish.map((c) =>
+                c.id === creatorId ? revertCreatorToVersion(c, versionId) : c
+              ),
+            }
+          : null
+      );
+    }
+    triggerToast(
+      `Reverted ${targetName} back to "${targetVersionLabel}"! Checked fields will now migrate from this version.`
+    );
+  };
+
+  // Pre-Flight Notion Read Check: Reads Brianna's Desk (c4357c4d-75c0-810f-95a6-0003bcac8153) & Max's Production Table first
+  const handlePreflightReadNotionTable = async (creatorsToCheck: CreatorRecord[]) => {
+    try {
+      const response = await fetch('/api/notion/preflight-read-and-fetch-collab', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          briannasDeskNotionId: BRIANNAS_DESK_COLLAB_NOTION_ID,
+          maxProductionTableId: MAX_PRODUCTION_TABLE_ID,
+          creatorIds: creatorsToCheck.map((c) => c.id),
+        }),
+      });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.existingFieldsByCreatorId) {
+          setCreators((prev) =>
+            prev.map((c) => {
+              const foundExisting = data.existingFieldsByCreatorId[c.id];
+              if (!foundExisting) return c;
+              return {
+                ...c,
+                hasExistingNotionData: true,
+                existingNotionTableData: {
+                  ...(c.existingNotionTableData || {}),
+                  ...foundExisting,
+                },
+              };
+            })
+          );
+        }
+      }
+    } catch (err) {
+      // Fallback uses initialized existingNotionTableData
+    }
   };
 
   // Switch Global Project Tone across all 40 creators immediately (rewriting the shrunk-down Q&A + info blobs comment template in the user's chosen tone)
@@ -608,16 +711,19 @@ export default function App() {
     }
   };
 
-  // Open the Mandatory Pre-Publish Confirmation Modal (Never publishes without asking first)
+  // Open the Mandatory Pre-Publish Confirmation Modal: Reads Notion Table first & warns if data is already present
   const requestPublishConfirmation = (
     creatorsList: CreatorRecord[],
     defaultHub: 'my-contacts-desk' | 'chromatics-outreach' = 'my-contacts-desk'
   ) => {
     if (!creatorsList.length) return;
+    const first = creatorsList[0];
+    setModalRevertVersionId(first.activeVersionId || 'v2.0-latest-agent-run');
     setPendingPublishModal({
       creatorsToPublish: creatorsList,
       targetHub: defaultHub,
     });
+    handlePreflightReadNotionTable(creatorsList);
   };
 
   // Run AI Vetting Agent on a single creator with `selectedPlatforms` filter input
@@ -923,43 +1029,125 @@ export default function App() {
     );
   };
 
-  // Step 3 of Pre-Live Gate: Click "Make Live" (Only executes after rows are checked in Notion Pre-Live Staging Table)
-  const handleMakeLiveInProductionNotion = async (creatorsToMakeLive: CreatorRecord[]) => {
-    const verifiedRows = creatorsToMakeLive.filter(
-      (c) => c.notionStagingCheckedByBrianna || c.preLiveStagingStatus === 'checked-in-notion'
-    );
-    if (verifiedRows.length === 0) {
-      triggerToast(
-        'Hold on! Before anything is made live, place the changes in the Pre-Live Staging Table and check them in Notion first.'
+  // Step 3 of Pre-Live Gate: Fetch Brianna's Desk (c4357c4d-75c0-810f-95a6-0003bcac8153) & Migrate Checked Fields to Max's Production Table
+  const handleMakeLiveInProductionNotion = async (
+    creatorsToMakeLive: CreatorRecord[],
+    options?: {
+      checkedFields?: ChromaSyncableFieldKey[];
+      fieldWriteStrategies?: Record<ChromaSyncableFieldKey, FieldWriteStrategy>;
+      fetchFromBriannasDeskCollabFirst?: boolean;
+    }
+  ) => {
+    const activeCheckedFields =
+      options?.checkedFields ||
+      ALL_SYNCABLE_FIELDS_META.filter((m) => modalCheckedFieldsMap[m.fieldKey]).map(
+        (m) => m.fieldKey
       );
+    const activeStrategies = options?.fieldWriteStrategies || modalFieldStrategyMap;
+
+    if (activeCheckedFields.length === 0) {
+      triggerToast('Please check at least 1 field checkbox to send to the Notion Table.');
       return;
     }
+
+    const rowsToMigrate = creatorsToMakeLive.length > 0 ? creatorsToMakeLive : [selectedCreator];
 
     setIsMakingLive(true);
     setIsPublishingConfirmed(true);
     const todayDate = new Date().toISOString().split('T')[0];
     const nowTime = new Date().toISOString().replace('T', ' ').substring(0, 16);
-    const totalCount = verifiedRows.length;
+    const chromaSig = formatChromaAgentSignature(nowTime);
+    const totalCount = rowsToMigrate.length;
     const targetHub = pendingPublishModal?.targetHub || 'my-contacts-desk';
 
     setSyncProgress({
       current: 0,
       total: totalCount,
-      currentName: 'Making verified Notion Staging rows LIVE in production...',
+      currentName: `Fetching Brianna's Desk (${BRIANNAS_DESK_COLLAB_NOTION_ID}) & checking existing Notion data...`,
     });
 
     try {
+      await handlePreflightReadNotionTable(rowsToMigrate);
+
       for (let i = 0; i < totalCount; i++) {
-        const creator = verifiedRows[i];
+        const creator = rowsToMigrate[i];
         setSyncProgress({
           current: i + 1,
           total: totalCount,
-          currentName: `Making LIVE: ${creator.name} (#${creator.rank})...`,
+          currentName: `Migrating ${activeCheckedFields.length} checked fields for ${creator.name} (#${creator.rank}) to Max's Production Table...`,
         });
 
         setCreators((prev) =>
           prev.map((c) => (c.id === creator.id ? { ...c, notionSyncStatus: 'syncing' } : c))
         );
+
+        const existingData = creator.existingNotionTableData || {};
+        const signedDossier = { ...creator.vettingDossier };
+
+        const signOrSkipDossierField = (
+          key: ChromaSyncableFieldKey,
+          currentVal: string | undefined
+        ): string => {
+          if (!activeCheckedFields.includes(key)) {
+            return existingData[key] || currentVal || '';
+          }
+          const strat = activeStrategies[key] || 'overwrite';
+          return applyChromaSignatureAndWriteStrategy(
+            currentVal || '',
+            existingData[key],
+            strat,
+            nowTime
+          );
+        };
+
+        signedDossier.overallSummary = signOrSkipDossierField(
+          'overallSummary',
+          creator.vettingDossier.overallSummary
+        );
+        signedDossier.watchedOrRead = signOrSkipDossierField(
+          'watchedOrRead',
+          creator.vettingDossier.watchedOrRead
+        );
+        signedDossier.audienceProfile = signOrSkipDossierField(
+          'audienceProfile',
+          creator.vettingDossier.audienceProfile
+        );
+        signedDossier.readingAppsEreadersAndAI = signOrSkipDossierField(
+          'readingAppsEreadersAndAI',
+          creator.vettingDossier.readingAppsEreadersAndAI
+        );
+        signedDossier.competitorTiesAnalysis = signOrSkipDossierField(
+          'competitorTiesAnalysis',
+          creator.vettingDossier.competitorTiesAnalysis
+        );
+        signedDossier.recommendChromaticsWhy = signOrSkipDossierField(
+          'recommendChromaticsWhy',
+          creator.vettingDossier.recommendChromaticsWhy
+        );
+        signedDossier.outreachLeadHook = signOrSkipDossierField(
+          'outreachLeadHook',
+          creator.vettingDossier.outreachLeadHook
+        );
+        signedDossier.gutFeeling = signOrSkipDossierField(
+          'gutFeeling',
+          creator.vettingDossier.gutFeeling
+        );
+        signedDossier.formattedNotionComment = signOrSkipDossierField(
+          'formattedNotionComment',
+          creator.vettingDossier.formattedNotionComment
+        );
+        signedDossier.humanWatchComment = signedDossier.formattedNotionComment;
+
+        const signedResearchNotes = activeCheckedFields.includes('researchNotes')
+          ? applyChromaSignatureAndWriteStrategy(
+              creator.researchNotes,
+              existingData.researchNotes,
+              activeStrategies.researchNotes || 'overwrite',
+              nowTime
+            )
+          : creator.researchNotes;
+
+        const migrationSummary = `Fetched Brianna's Desk (${BRIANNAS_DESK_COLLAB_NOTION_ID}) & migrated ${activeCheckedFields.length} checked fields (${activeCheckedFields.slice(0, 5).join(', ')}...) to Max's Production Table ${chromaSig}`;
 
         const response = await fetch('/api/notion/sync-creator', {
           method: 'POST',
@@ -967,41 +1155,84 @@ export default function App() {
           body: JSON.stringify({
             creator: {
               ...creator,
-              stage: 'Vetted',
+              stage: activeCheckedFields.includes('stage') ? 'Vetted' : creator.stage,
               vettedDate: creator.vettedDate || todayDate,
+              researchNotes: signedResearchNotes,
+              vettingDossier: signedDossier,
+              lastChangedAt: nowTime,
+              chromaAgentSignature: chromaSig,
+              latestAgentRunChangesDescription: migrationSummary,
               modificationBlob:
                 creator.modificationBlob || buildCreatorAttributionBlob(creator, projectToneMode),
             },
             targetHub,
             selectedPlatforms,
+            checkedFields: activeCheckedFields,
+            fieldWriteStrategies: activeStrategies,
+            briannasDeskNotionId: BRIANNAS_DESK_COLLAB_NOTION_ID,
+            maxProductionTableId: MAX_PRODUCTION_TABLE_ID,
+            fetchFromBriannasDeskCollabFirst: true,
             autoFormatDatabase: true,
             userConfirmedPublish: true,
           }),
         });
 
         if (!response.ok) {
-          throw new Error(`Failed to make ${creator.name} live`);
+          throw new Error(`Failed to migrate ${creator.name} to Max's Production Table`);
         }
 
         const data = await response.json();
 
         setCreators((prev) =>
-          prev.map((c) =>
-            c.id === creator.id
-              ? {
-                  ...c,
-                  stage: 'Vetted',
-                  vettedDate: c.vettedDate || todayDate,
-                  notionSyncStatus: 'synced',
-                  preLiveStagingStatus: 'live',
-                  madeLiveAt: nowTime,
-                  notionPageId: data.notionPageId || c.notionPageId,
-                  notionSyncOperation: data.operation || 'created',
-                  notionLastSyncedAt: data.notionLastSyncedAt,
-                  notionPageUrl: data.notionPageUrl || c.notionPageUrl,
-                }
-              : c
-          )
+          prev.map((c) => {
+            if (c.id !== creator.id) return c;
+            const vcUrl =
+              data.notionVersionControlUrl ||
+              c.notionVersionControlUrl ||
+              `https://www.notion.so/${BRIANNAS_DESK_COLLAB_NOTION_ID.replace(/-/g, '')}?p=${c.id}&v=version-history`;
+            const prevHistory = c.versionHistory || [];
+            const nextVerId = `v3.${prevHistory.length}-migrated`;
+            return {
+              ...c,
+              stage: activeCheckedFields.includes('stage') ? 'Vetted' : c.stage,
+              vettedDate: c.vettedDate || todayDate,
+              researchNotes: signedResearchNotes,
+              vettingDossier: signedDossier,
+              notionSyncStatus: 'synced',
+              preLiveStagingStatus: 'live',
+              notionStagingCheckedByBrianna: true,
+              madeLiveAt: nowTime,
+              migratedToMaxProductionAt: nowTime,
+              lastChangedAt: nowTime,
+              chromaAgentSignature: chromaSig,
+              latestAgentRunChangesDescription: migrationSummary,
+              notionVersionControlUrl: vcUrl,
+              activeVersionId: nextVerId,
+              versionHistory: [
+                ...prevHistory,
+                {
+                  versionId: nextVerId,
+                  versionLabel: `${nextVerId} — Migrated to Max's Production Table (${nowTime})`,
+                  timestamp: nowTime,
+                  author: 'Chroma Agent',
+                  changesDescription: migrationSummary,
+                  chromaSignature: chromaSig,
+                  notionVersionHistoryUrl: vcUrl,
+                  snapshotData: {
+                    teamTake: c.teamTake,
+                    verdict: c.verdict,
+                    stage: activeCheckedFields.includes('stage') ? 'Vetted' : c.stage,
+                    researchNotes: signedResearchNotes,
+                    vettingDossier: signedDossier,
+                  },
+                },
+              ],
+              notionPageId: data.notionPageId || c.notionPageId,
+              notionSyncOperation: data.operation || 'updated',
+              notionLastSyncedAt: data.notionLastSyncedAt || nowTime,
+              notionPageUrl: data.notionPageUrl || c.notionPageUrl,
+            };
+          })
         );
       }
 
@@ -1009,11 +1240,11 @@ export default function App() {
       setPendingPublishModal(null);
       triggerToast(
         totalCount === 1
-          ? `MADE LIVE: ${verifiedRows[0].name} is now live in Notion DB (with Agent vs. Brianna Attribution Blob + @Bree comment).`
-          : `MADE LIVE: ${totalCount} checked creators promoted from Pre-Live Staging Table to Live Notion DB!`
+          ? `MIGRATED TO MAX'S PRODUCTION TABLE: Fetched Brianna's Desk (${BRIANNAS_DESK_COLLAB_NOTION_ID}) & synced ${activeCheckedFields.length} checked fields for ${rowsToMigrate[0].name} with ${chromaSig}!`
+          : `MIGRATED TO MAX'S PRODUCTION TABLE: Fetched Brianna's Desk (${BRIANNAS_DESK_COLLAB_NOTION_ID}) & migrated ${totalCount} contacts (${activeCheckedFields.length} checked fields each) with ${chromaSig}!`
       );
     } catch (err: any) {
-      triggerToast(`Make Live error: ${err?.message}`);
+      triggerToast(`Migration error: ${err?.message}`);
     } finally {
       setIsMakingLive(false);
       setIsPublishingConfirmed(false);
@@ -1021,10 +1252,17 @@ export default function App() {
     }
   };
 
-  // Execute Notion Database Create/Update ONLY after user checks the Pre-Live Staging Table in Notion and clicks "Make Live"
+  // Execute Notion Database Create/Update with selected field checkboxes & Overwrite/Append strategies
   const handleConfirmedPublishToNotion = async () => {
     if (!pendingPublishModal) return;
-    await handleMakeLiveInProductionNotion(pendingPublishModal.creatorsToPublish);
+    const checkedKeys = ALL_SYNCABLE_FIELDS_META.filter(
+      (m) => modalCheckedFieldsMap[m.fieldKey]
+    ).map((m) => m.fieldKey);
+    await handleMakeLiveInProductionNotion(pendingPublishModal.creatorsToPublish, {
+      checkedFields: checkedKeys,
+      fieldWriteStrategies: modalFieldStrategyMap,
+      fetchFromBriannasDeskCollabFirst: true,
+    });
   };
 
   // Batch Draft-Vet Next 5 Unvetted Creators across `selectedPlatforms`, then open Pre-Publish Modal for Notion DB sync
@@ -1555,173 +1793,206 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FAF9F5] text-slate-900 flex flex-col">
-      {/* Top Bar Contract: Zone 1 (Brand) — Zone 2 (5 Single-Line Nav Links) — Zone 3 (1 Primary Action) */}
+      {/* Top Bar Contract: Zone 1 (Brand & Primary Actions) + Zone 2 (7 Numbered Navigation Links 1–7) */}
       <header
         className={`${
           showMobileExperience ? 'hidden' : 'hidden md:flex'
-        } sticky top-0 z-30 items-center justify-between gap-8 px-6 py-3.5 bg-[#FAF9F5]/95 backdrop-blur border-b border-stone-200`}
+        } sticky top-0 z-30 flex-col bg-[#FAF9F5]/95 backdrop-blur border-b border-stone-200`}
       >
-        <a
-          href="#top"
-          onClick={(e) => {
-            e.preventDefault();
-            setActiveView('notion-desk');
-          }}
-          className="font-display text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
-        >
-          Chromatics Vetting Desk
-        </a>
+        <div className="max-w-[1440px] w-full mx-auto px-6 py-2.5 flex items-center justify-between gap-4 border-b border-stone-200/80">
+          <div className="flex items-center gap-3">
+            <a
+              href="#top"
+              onClick={(e) => {
+                e.preventDefault();
+                handleNavigateToView('notion-desk');
+              }}
+              className="font-display text-base font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
+            >
+              Chromatics Vetting Desk
+            </a>
+            <span className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-[11px] font-mono text-indigo-800">
+              <span>Brianna&rsquo;s Desk ID: {BRIANNAS_DESK_COLLAB_NOTION_ID}</span>
+            </span>
+          </div>
 
-        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
+          <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
+            {/* Quick Vetting Mode Toggle (Most Recent 3 Posts per Platform + NYC Commentary Tone) */}
+            <button
+              type="button"
+              onClick={() => {
+                const next = !isQuickVettingMode;
+                setIsQuickVettingMode(next);
+                triggerToast(
+                  next
+                    ? 'Quick Vetting Mode ON: AI research scope reduced to the 3 most recent posts per platform (NYC commentary tone preserved).'
+                    : 'Quick Vetting Mode OFF: Full deep-dive post scope restored.'
+                );
+              }}
+              title="When enabled, reduces the AI agent's research scope to only the most recent 3 posts per platform while keeping Brianna's NYC-style commentary tone"
+              className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                isQuickVettingMode
+                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-xs'
+                  : 'bg-stone-100 text-slate-700 border-stone-300 hover:bg-stone-200'
+              }`}
+            >
+              <Zap className={`w-3.5 h-3.5 ${isQuickVettingMode ? 'text-amber-300 fill-amber-300' : 'text-amber-600'}`} />
+              <span>{isQuickVettingMode ? 'Quick Vetting: ON (3 Posts)' : 'Quick Vetting'}</span>
+            </button>
+
+            {/* Dark Mode Toggle */}
+            <button
+              type="button"
+              onClick={() => setIsDarkMode((prev) => !prev)}
+              title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              aria-label={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-stone-300 bg-stone-100 text-slate-700 hover:bg-stone-200 transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer"
+            >
+              {isDarkMode ? (
+                <>
+                  <Sun className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Light</span>
+                </>
+              ) : (
+                <>
+                  <Moon className="w-3.5 h-3.5 text-slate-700" />
+                  <span>Dark</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsConflictModalOpen(true)}
+              className="px-3 py-1.5 text-xs font-semibold text-amber-900 bg-amber-100/90 hover:bg-amber-200/80 border border-amber-300 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
+              <span>Conflicts ({flaggedConflictCreators.length})</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleRunFullPipeline('first-ten')}
+              disabled={isBatchRunning}
+              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5" />
+              <span>
+                {isBatchRunning
+                  ? 'Running Pipeline...'
+                  : isQuickVettingMode
+                  ? 'Quick Vet Pipeline (First 10)'
+                  : 'Run Pipeline (First 10)'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => requestPublishConfirmation(creators, 'my-contacts-desk')}
+              className="px-3.5 py-1.5 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Migrate to Max&rsquo;s Production DB</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Dedicated 7-Item Numbered Navigation Bar (Never Clipped or Cut Off) */}
+        <nav
+          aria-label="Primary Workspace Views"
+          className="max-w-[1440px] w-full mx-auto px-6 py-2 flex items-center gap-2 lg:gap-3 overflow-x-auto text-xs font-semibold text-slate-600"
+        >
           <button
-            onClick={() => setActiveView('workspace-scanner')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
+            type="button"
+            onClick={() => handleNavigateToView('workspace-scanner')}
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 border ${
               activeView === 'workspace-scanner'
-                ? 'border-slate-900 text-slate-900 font-semibold'
-                : 'border-transparent hover:text-slate-900'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                : 'bg-white text-slate-700 border-stone-200 hover:bg-stone-100 hover:text-slate-900'
             }`}
           >
-            1. Workspace Scan
+            <Radar className="w-3.5 h-3.5 text-indigo-500" />
+            <span>1. Workspace Scan</span>
           </button>
+
           <button
-            onClick={() => setActiveView('notion-desk')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
+            type="button"
+            onClick={() => handleNavigateToView('notion-desk')}
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 border ${
               activeView === 'notion-desk'
-                ? 'border-slate-900 text-slate-900 font-semibold'
-                : 'border-transparent hover:text-slate-900'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                : 'bg-white text-slate-700 border-stone-200 hover:bg-stone-100 hover:text-slate-900'
             }`}
           >
-            2. Notion Desk
+            <Database className="w-3.5 h-3.5 text-amber-500" />
+            <span>2. Notion Desk</span>
           </button>
+
           <button
-            onClick={() => setActiveView('performance-dashboard')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer flex items-center gap-1.5 ${
+            type="button"
+            onClick={() => handleNavigateToView('performance-dashboard')}
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 border ${
               activeView === 'performance-dashboard'
-                ? 'border-slate-900 text-slate-900 font-semibold'
-                : 'border-transparent hover:text-slate-900'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                : 'bg-white text-slate-700 border-stone-200 hover:bg-stone-100 hover:text-slate-900'
             }`}
           >
-            <BarChart3 className="w-3.5 h-3.5 text-indigo-600" />
+            <BarChart3 className="w-3.5 h-3.5 text-indigo-500" />
             <span>3. Performance Dashboard</span>
           </button>
+
           <button
-            onClick={() => setActiveView('prelive-staging')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer flex items-center gap-1.5 ${
+            type="button"
+            onClick={() => handleNavigateToView('prelive-staging')}
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 border ${
               activeView === 'prelive-staging'
-                ? 'border-slate-900 text-slate-900 font-semibold'
-                : 'border-transparent hover:text-slate-900'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                : 'bg-white text-slate-700 border-stone-200 hover:bg-stone-100 hover:text-slate-900'
             }`}
           >
-            <GitCompare className="w-3.5 h-3.5 text-fuchsia-600" />
-            <span>4. Pre-Live Staging &amp; Blobs</span>
+            <GitCompare className="w-3.5 h-3.5 text-fuchsia-500" />
+            <span>4. Pre-Live Staging &amp; Version Control</span>
           </button>
+
           <button
-            onClick={() => setActiveView('spreadsheet')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer flex items-center gap-1.5 ${
+            type="button"
+            onClick={() => handleNavigateToView('spreadsheet')}
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 border ${
               activeView === 'spreadsheet'
-                ? 'border-slate-900 text-slate-900 font-semibold'
-                : 'border-transparent hover:text-slate-900'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                : 'bg-white text-slate-700 border-stone-200 hover:bg-stone-100 hover:text-slate-900'
             }`}
           >
-            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500" />
             <span>5. Sheets &amp; Notion DB</span>
           </button>
+
           <button
-            onClick={() => setActiveView('competitor-radar')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
+            type="button"
+            onClick={() => handleNavigateToView('competitor-radar')}
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 border ${
               activeView === 'competitor-radar'
-                ? 'border-slate-900 text-slate-900 font-semibold'
-                : 'border-transparent hover:text-slate-900'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                : 'bg-white text-slate-700 border-stone-200 hover:bg-stone-100 hover:text-slate-900'
             }`}
           >
-            Competitor Watchlist
+            <BookOpen className="w-3.5 h-3.5 text-rose-500" />
+            <span>6. Competitor Watchlist</span>
           </button>
+
           <button
-            onClick={() => setActiveView('boss-questions')}
-            className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
+            type="button"
+            onClick={() => handleNavigateToView('boss-questions')}
+            className={`px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1.5 border ${
               activeView === 'boss-questions'
-                ? 'border-slate-900 text-slate-900 font-semibold'
-                : 'border-transparent hover:text-slate-900'
+                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs'
+                : 'bg-white text-slate-700 border-stone-200 hover:bg-stone-100 hover:text-slate-900'
             }`}
           >
-            Vetting Questions
+            <SlidersHorizontal className="w-3.5 h-3.5 text-cyan-500" />
+            <span>7. Vetting Questions</span>
           </button>
         </nav>
-
-        <div className="flex items-center gap-2 shrink-0">
-          {/* Quick Vetting Mode Toggle (Most Recent 3 Posts per Platform + NYC Commentary Tone) */}
-          <button
-            type="button"
-            onClick={() => {
-              const next = !isQuickVettingMode;
-              setIsQuickVettingMode(next);
-              triggerToast(
-                next
-                  ? 'Quick Vetting Mode ON: AI research scope reduced to the 3 most recent posts per platform (NYC commentary tone preserved).'
-                  : 'Quick Vetting Mode OFF: Full deep-dive post scope restored.'
-              );
-            }}
-            title="When enabled, reduces the AI agent's research scope to only the most recent 3 posts per platform while keeping Brianna's NYC-style commentary tone"
-            className={`px-3 py-2 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
-              isQuickVettingMode
-                ? 'bg-emerald-600 text-white border-emerald-500 shadow-xs'
-                : 'bg-stone-100 text-slate-700 border-stone-300 hover:bg-stone-200'
-            }`}
-          >
-            <Zap className={`w-3.5 h-3.5 ${isQuickVettingMode ? 'text-amber-300 fill-amber-300' : 'text-amber-600'}`} />
-            <span>{isQuickVettingMode ? 'Quick Vetting: ON (3 Posts)' : 'Quick Vetting'}</span>
-          </button>
-
-          {/* Dark Mode Toggle */}
-          <button
-            type="button"
-            onClick={() => setIsDarkMode((prev) => !prev)}
-            title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-            aria-label={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
-            className="p-2 text-xs font-semibold rounded-lg border border-stone-300 bg-stone-100 text-slate-700 hover:bg-stone-200 transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer"
-          >
-            {isDarkMode ? (
-              <>
-                <Sun className="w-3.5 h-3.5 text-amber-400" />
-                <span className="hidden xl:inline">Light</span>
-              </>
-            ) : (
-              <>
-                <Moon className="w-3.5 h-3.5 text-slate-700" />
-                <span className="hidden xl:inline">Dark</span>
-              </>
-            )}
-          </button>
-
-          <button
-            onClick={() => setIsConflictModalOpen(true)}
-            className="px-3 py-2 text-xs font-semibold text-amber-900 bg-amber-100/90 hover:bg-amber-200/80 border border-amber-300 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-          >
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-700" />
-            <span>Conflicts ({flaggedConflictCreators.length})</span>
-          </button>
-          <button
-            onClick={() => handleRunFullPipeline('first-ten')}
-            disabled={isBatchRunning}
-            className="px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-          >
-            <Play className="w-3.5 h-3.5" />
-            <span>
-              {isBatchRunning
-                ? 'Running Pipeline...'
-                : isQuickVettingMode
-                ? 'Quick Vet Pipeline (First 10)'
-                : 'Run Pipeline (First 10)'}
-            </span>
-          </button>
-          <button
-            onClick={() => requestPublishConfirmation(creators, 'my-contacts-desk')}
-            className="px-3.5 py-2 text-xs font-semibold text-white bg-slate-900 rounded-lg hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>Sync All 40 to Notion DB</span>
-          </button>
-        </div>
       </header>
 
       {/* Toast Notification Banner */}
@@ -2145,6 +2416,232 @@ export default function App() {
                     {primaryCreator?.vettingDossier.formattedNotionComment}
                   </div>
                 </div>
+                {/* Pre-Flight Notion Read Check Warning + Per-Field Checkboxes & Overwrite/Append Selector + Version Revert */}
+                {primaryCreator && (() => {
+                  const modalFieldConfigs = buildDefaultFieldSyncConfigs(
+                    primaryCreator,
+                    modalCheckedFieldsMap,
+                    modalFieldStrategyMap
+                  );
+                  const checkedModalCount = modalFieldConfigs.filter((f) => f.checked).length;
+                  const versionList = primaryCreator.versionHistory || [];
+                  const activeRevertSelection =
+                    modalRevertVersionId ||
+                    primaryCreator.activeVersionId ||
+                    versionList[versionList.length - 1]?.versionId ||
+                    'v2.0-latest-agent-run';
+
+                  return (
+                    <div className="space-y-4">
+                      {/* Warning Banner: Existing Data Already Present in Notion Table */}
+                      <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 font-bold text-amber-950 text-xs">
+                            <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" />
+                            <span>
+                              Pre-Flight Notion Read Warning: Existing Data Present in Brianna&rsquo;s Desk ({BRIANNAS_DESK_COLLAB_NOTION_ID}) &amp; Max&rsquo;s Table
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setModalFieldStrategyMap(
+                                  ALL_SYNCABLE_FIELDS_META.reduce((acc, item) => {
+                                    acc[item.fieldKey] = 'append';
+                                    return acc;
+                                  }, {} as Record<ChromaSyncableFieldKey, FieldWriteStrategy>)
+                                )
+                              }
+                              className="px-2.5 py-1 text-[11px] font-semibold bg-emerald-700 text-white rounded cursor-pointer"
+                            >
+                              Set All Checked: Append to Bottom
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setModalFieldStrategyMap(
+                                  ALL_SYNCABLE_FIELDS_META.reduce((acc, item) => {
+                                    acc[item.fieldKey] = 'overwrite';
+                                    return acc;
+                                  }, {} as Record<ChromaSyncableFieldKey, FieldWriteStrategy>)
+                                )
+                              }
+                              className="px-2.5 py-1 text-[11px] font-semibold bg-amber-800 text-white rounded cursor-pointer"
+                            >
+                              Set All Checked: Overwrite
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-amber-900 leading-relaxed">
+                          The Chroma Agent read the Notion table first and detected existing data on <strong>{primaryCreator.name}</strong>. Choose which fields to send using the checkboxes below, and select whether each field should <strong>Overwrite</strong> the existing Notion data or <strong>Append to the bottom</strong>. Every field sent is stamped with <code className="font-mono">{primaryCreator.chromaAgentSignature || formatChromaAgentSignature(primaryCreator.lastChangedAt)}</code>.
+                        </p>
+                      </div>
+
+                      {/* Version Control & Revert Bar (Before Migrating Checked Fields to Max's Production Table) */}
+                      <div className="p-3.5 rounded-xl bg-stone-100 border border-stone-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-0.5">
+                          <div className="font-bold text-slate-900 flex items-center gap-1.5 text-xs">
+                            <History className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>
+                              Revert Contact Card Version Before Migrating ({primaryCreator.name})
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-600">
+                            Most Recent Change: <strong className="font-mono">{primaryCreator.lastChangedAt || '2026-10-31 20:04'}</strong> &middot;{' '}
+                            <a
+                              href={
+                                primaryCreator.notionVersionControlUrl ||
+                                `https://www.notion.so/${BRIANNAS_DESK_COLLAB_NOTION_ID.replace(/-/g, '')}?p=${primaryCreator.id}&v=version-history`
+                              }
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-indigo-700 hover:underline font-semibold"
+                            >
+                              Open Notion Version Control Screen &rarr;
+                            </a>
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <select
+                            aria-label="Select version to revert contact card"
+                            value={activeRevertSelection}
+                            onChange={(e) => setModalRevertVersionId(e.target.value)}
+                            className="px-2.5 py-1.5 text-[11px] font-mono bg-white border border-stone-300 rounded-lg text-slate-800 max-w-[260px]"
+                          >
+                            {versionList.map((v) => (
+                              <option key={v.versionId} value={v.versionId}>
+                                {v.versionLabel}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              handleRevertCreatorVersion(primaryCreator.id, activeRevertSelection)
+                            }
+                            className="px-3 py-1.5 text-xs font-semibold text-amber-950 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            <span>Revert to Version</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Per-Field Checkboxes & Overwrite vs. Append Matrix */}
+                      <div className="border border-stone-200 rounded-xl overflow-hidden">
+                        <div className="px-3.5 py-2 bg-stone-100 border-b border-stone-200 flex items-center justify-between">
+                          <span className="font-bold text-slate-800 text-xs">
+                            Select Fields to Migrate ({checkedModalCount} / {modalFieldConfigs.length} Checked)
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setModalCheckedFieldsMap(
+                                  ALL_SYNCABLE_FIELDS_META.reduce((acc, item) => {
+                                    acc[item.fieldKey] = true;
+                                    return acc;
+                                  }, {} as Record<ChromaSyncableFieldKey, boolean>)
+                                )
+                              }
+                              className="text-[11px] font-semibold text-indigo-700 hover:underline cursor-pointer"
+                            >
+                              Check All
+                            </button>
+                            <span>·</span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setModalCheckedFieldsMap(
+                                  ALL_SYNCABLE_FIELDS_META.reduce((acc, item) => {
+                                    acc[item.fieldKey] = false;
+                                    return acc;
+                                  }, {} as Record<ChromaSyncableFieldKey, boolean>)
+                                )
+                              }
+                              className="text-[11px] font-semibold text-slate-600 hover:underline cursor-pointer"
+                            >
+                              Uncheck All
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="max-h-52 overflow-y-auto divide-y divide-stone-200">
+                          {modalFieldConfigs.map((cfg) => {
+                            const signedPreview = applyChromaSignatureAndWriteStrategy(
+                              cfg.incomingValue,
+                              cfg.existingNotionValue,
+                              cfg.writeStrategy,
+                              primaryCreator.lastChangedAt
+                            );
+                            return (
+                              <div
+                                key={cfg.fieldKey}
+                                className="px-3.5 py-2 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[11px]"
+                              >
+                                <label className="inline-flex items-center gap-2 cursor-pointer font-semibold text-slate-900 min-w-[210px]">
+                                  <input
+                                    type="checkbox"
+                                    checked={cfg.checked}
+                                    onChange={() =>
+                                      setModalCheckedFieldsMap((prev) => ({
+                                        ...prev,
+                                        [cfg.fieldKey]: !prev[cfg.fieldKey],
+                                      }))
+                                    }
+                                    className="w-3.5 h-3.5 rounded border-stone-300 text-indigo-600 cursor-pointer"
+                                  />
+                                  <span>{cfg.label}</span>
+                                </label>
+
+                                <div className="font-mono text-[10px] text-slate-600 truncate max-w-xs flex-1">
+                                  {signedPreview}
+                                </div>
+
+                                <div className="inline-flex rounded border border-stone-300 bg-stone-100 p-0.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setModalFieldStrategyMap((prev) => ({
+                                        ...prev,
+                                        [cfg.fieldKey]: 'overwrite',
+                                      }))
+                                    }
+                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer ${
+                                      cfg.writeStrategy === 'overwrite'
+                                        ? 'bg-amber-700 text-white'
+                                        : 'text-slate-700'
+                                    }`}
+                                  >
+                                    Overwrite
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setModalFieldStrategyMap((prev) => ({
+                                        ...prev,
+                                        [cfg.fieldKey]: 'append',
+                                      }))
+                                    }
+                                    className={`px-2 py-0.5 rounded text-[10px] font-semibold cursor-pointer ${
+                                      cfg.writeStrategy === 'append'
+                                        ? 'bg-emerald-700 text-white'
+                                        : 'text-slate-700'
+                                    }`}
+                                  >
+                                    Append to Bottom
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Visual Progress Bar during Synchronization */}
@@ -2194,30 +2691,20 @@ export default function App() {
                   <button
                     type="button"
                     onClick={handleConfirmedPublishToNotion}
-                    disabled={isPublishingConfirmed || !allCheckedInNotion}
-                    title={
-                      !allCheckedInNotion
-                        ? 'Check the rows in the Notion Pre-Live Staging Table first (Step 2) to unlock Make Live'
-                        : 'Make verified changes live in production Notion DB'
-                    }
-                    className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 ${
-                      allCheckedInNotion
-                        ? 'text-white bg-emerald-600 hover:bg-emerald-700 cursor-pointer shadow-xs'
-                        : 'text-slate-400 bg-stone-200 border border-stone-300 cursor-not-allowed'
-                    }`}
+                    disabled={isPublishingConfirmed}
+                    title={`Fetch Brianna's Desk (${BRIANNAS_DESK_COLLAB_NOTION_ID}) & migrate checked fields to Max's Production Table`}
+                    className="px-4 py-2 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 text-white bg-emerald-600 hover:bg-emerald-700 cursor-pointer shadow-xs"
                   >
                     {isPublishingConfirmed ? (
                       <>
                         <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                        <span>Making Live in Notion DB...</span>
+                        <span>Fetching Brianna&rsquo;s Desk &amp; Migrating...</span>
                       </>
                     ) : (
                       <>
                         <ShieldCheck className="w-3.5 h-3.5" />
                         <span>
-                          {allCheckedInNotion
-                            ? `3. Make Live (${modalCreators.length} Checked in Notion)`
-                            : 'Check in Notion First to Unlock "Make Live"'}
+                          Fetch Brianna&rsquo;s Desk ({BRIANNAS_DESK_COLLAB_NOTION_ID.slice(0, 8)}) &amp; Migrate Checked Fields to Max&rsquo;s Production Table
                         </span>
                       </>
                     )}
@@ -2563,25 +3050,27 @@ export default function App() {
               />
             )}
 
-            {/* VIEW: PRE-LIVE NOTION STAGING TABLE & MODIFICATION ATTRIBUTION BLOBS (AI Agent vs. Brianna) */}
+            {/* VIEW: PRE-LIVE NOTION STAGING TABLE, PER-FIELD OVERWRITE/APPEND & VERSION CONTROL */}
             {activeView === 'prelive-staging' && (
               <PreLiveStagingTableView
                 creators={creators}
                 selectedCreatorId={selectedCreatorId}
-                selectedPlatforms={selectedPlatforms}
                 projectToneMode={projectToneMode}
                 onSelectCreator={setSelectedCreatorId}
                 onOpenDossierInDesk={(c) => {
                   setSelectedCreatorId(c.id);
-                  setActiveView('notion-desk');
+                  handleNavigateToView('notion-desk');
                 }}
                 onPushToNotionStagingTable={handlePushToNotionStagingTable}
-                onToggleCheckedInNotion={handleToggleCheckedInNotionStaging}
-                onMarkAllCheckedInNotion={handleMarkAllCheckedInNotionStaging}
-                onMakeLive={handleMakeLiveInProductionNotion}
+                onToggleCheckedInNotionStaging={handleToggleCheckedInNotionStaging}
+                onMarkAllCheckedInNotionStaging={handleMarkAllCheckedInNotionStaging}
+                onMakeLiveInProductionNotion={handleMakeLiveInProductionNotion}
+                onRevertCreatorVersion={handleRevertCreatorVersion}
+                onPreflightReadNotionTable={handlePreflightReadNotionTable}
                 isPushingStaging={isPushingStaging}
                 isMakingLive={isMakingLive}
                 stagingTableUrl={stagingTableUrl}
+                onTriggerToast={triggerToast}
               />
             )}
 
@@ -4513,12 +5002,29 @@ export default function App() {
                         <th className="py-2.5 px-3 min-w-[200px]">25. Outreach Lead Hook</th>
                         <th className="py-2.5 px-3 min-w-[200px]">26. Gut Feeling</th>
                         <th className="py-2.5 px-3 min-w-[240px]">27. Notion Comment (@Bree)</th>
-                        <th className="py-2.5 px-3">DB Actions</th>
+                        <th className="py-2.5 px-3 min-w-[230px]">
+                          28. Most Recent Change &amp; Notion Version Control
+                        </th>
+                        <th className="py-2.5 px-3 min-w-[250px]">
+                          29. Latest Agent Run Changes
+                        </th>
+                        <th className="py-2.5 px-3 min-w-[270px]">
+                          30. Revert Contact Card Version &amp; Migrate to Max&rsquo;s Production Table
+                        </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-stone-200 text-xs">
                       {creators.map((c) => {
                         const row = formatCreatorForDatabaseRow(c, selectedPlatforms);
+                        const lastChanged =
+                          c.lastChangedAt ||
+                          c.modificationBlob?.lastUpdatedAt ||
+                          '2026-10-31 20:04';
+                        const vcUrl =
+                          c.notionVersionControlUrl ||
+                          `https://www.notion.so/${BRIANNAS_DESK_COLLAB_NOTION_ID.replace(/-/g, '')}?p=${c.id}&v=version-history`;
+                        const versionList = c.versionHistory || [];
+
                         return (
                           <tr key={c.id} className="hover:bg-stone-50/90 transition-colors align-top">
                             <td className="py-3 px-3 font-mono text-slate-500 tabular-nums whitespace-nowrap">
@@ -4647,23 +5153,89 @@ export default function App() {
                                 {row['Notion Comment (@Bree)'] || '—'}
                               </p>
                             </td>
+
+                            {/* Column 28: Most Recent Time of Change & Link to Notion Version Control */}
                             <td className="py-3 px-3 whitespace-nowrap">
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  onClick={() => {
-                                    setSelectedCreatorId(c.id);
-                                    setActiveView('notion-desk');
-                                  }}
-                                  className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-stone-100 hover:bg-stone-200 rounded cursor-pointer"
-                                >
-                                  Open Dossier
-                                </button>
-                                <button
-                                  onClick={() => requestPublishConfirmation([c], 'my-contacts-desk')}
-                                  className="px-2.5 py-1 text-[11px] font-medium text-white bg-indigo-600 hover:bg-indigo-700 rounded cursor-pointer"
-                                >
-                                  Sync 27 Cols
-                                </button>
+                              <div className="font-mono text-xs font-bold text-slate-900">
+                                {lastChanged}
+                              </div>
+                              <div className="font-mono text-[10px] text-indigo-700 mt-0.5">
+                                {c.chromaAgentSignature || formatChromaAgentSignature(lastChanged)}
+                              </div>
+                              <a
+                                href={vcUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="mt-1 text-[11px] font-semibold text-indigo-700 hover:underline inline-flex items-center gap-1"
+                              >
+                                <History className="w-3 h-3" />
+                                <span>Notion Version Control</span>
+                                <ExternalLink className="w-2.5 h-2.5" />
+                              </a>
+                            </td>
+
+                            {/* Column 29: Description of Latest Agent Run Changes */}
+                            <td className="py-3 px-3 text-slate-700 max-w-xs">
+                              <p className="line-clamp-3 text-[11px] leading-relaxed">
+                                {c.latestAgentRunChangesDescription ||
+                                  row['Latest Agent Run Changes']}
+                              </p>
+                            </td>
+
+                            {/* Column 30: Revert Contact Card Version & Migrate to Max's Production Table */}
+                            <td className="py-3 px-3 whitespace-nowrap">
+                              <div className="space-y-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  <select
+                                    aria-label={`Revert version for ${c.name}`}
+                                    value={c.activeVersionId || 'v2.0-latest-agent-run'}
+                                    onChange={(e) =>
+                                      handleRevertCreatorVersion(c.id, e.target.value)
+                                    }
+                                    className="px-2 py-1 text-[10px] font-mono bg-white border border-stone-300 rounded text-slate-800 max-w-[180px]"
+                                  >
+                                    {versionList.map((v) => (
+                                      <option key={v.versionId} value={v.versionId}>
+                                        {v.versionLabel}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleRevertCreatorVersion(
+                                        c.id,
+                                        versionList[0]?.versionId || 'v1.0-briannas-desk'
+                                      )
+                                    }
+                                    className="px-2 py-1 text-[10px] font-semibold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded inline-flex items-center gap-1 cursor-pointer"
+                                    title="Revert to Brianna's Desk baseline before migrating"
+                                  >
+                                    <RotateCcw className="w-2.5 h-2.5" />
+                                    <span>Revert</span>
+                                  </button>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSelectedCreatorId(c.id);
+                                      handleNavigateToView('notion-desk');
+                                    }}
+                                    className="px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-stone-100 hover:bg-stone-200 rounded cursor-pointer"
+                                  >
+                                    Open Dossier
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      requestPublishConfirmation([c], 'my-contacts-desk')
+                                    }
+                                    className="px-2.5 py-1 text-[11px] font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded cursor-pointer"
+                                  >
+                                    Fetch Brianna&rsquo;s Desk &amp; Migrate
+                                  </button>
+                                </div>
                               </div>
                             </td>
                           </tr>

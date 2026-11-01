@@ -590,17 +590,42 @@ function buildNotionDatabaseSchemaDefinition(titlePropertyName: string = 'Name')
     'Gut Feeling': { rich_text: {} },
     'Notion Comment (@Bree)': { rich_text: {} },
     'Modification Attribution Blob (Agent vs Brianna)': { rich_text: {} },
+    'Most Recent Change & Notion Version Control': { rich_text: {} },
+    'Latest Agent Run Changes': { rich_text: {} },
+    'Active Version & Chroma Agent Signature': { rich_text: {} },
   };
 }
 
-// Helper: Build all 27 Notion database row properties from a CreatorRecord + AI agent dossier
+const BRIANNAS_DESK_NOTION_ID = 'c4357c4d-75c0-810f-95a6-0003bcac8153';
+const MAX_PRODUCTION_TABLE_ID = '40457c4d75c0819d90c8cb35f1024e89';
+
+function stampChromaAgentSignatureOnField(
+  val: string,
+  existingVal: string | undefined,
+  strategy: 'overwrite' | 'append' = 'overwrite',
+  timestamp?: string
+): string {
+  const ts = timestamp || new Date().toISOString().replace('T', ' ').substring(0, 16);
+  const sig = `[Chroma Agent · Updated ${ts}]`;
+  const cleanIncoming = String(val || '').replace(/\s*\[Chroma Agent · Updated [^\]]+\]/g, '').trim();
+  const stampedIncoming = `${cleanIncoming} ${sig}`.trim();
+  if (strategy === 'append' && existingVal && existingVal.trim()) {
+    return `${existingVal.trim()}\n--- Appended by Chroma Agent (${ts}) ---\n${stampedIncoming}`;
+  }
+  return stampedIncoming;
+}
+
+// Helper: Build all 30 Notion database row properties from a CreatorRecord + AI agent dossier
 function buildFullNotionDatabaseProperties(
   creator: any,
   titlePropertyName: string = 'Name',
   selectedPlatforms?: string[],
-  vettedDateOverride?: string
+  vettedDateOverride?: string,
+  checkedFields?: string[],
+  fieldWriteStrategies?: Record<string, 'overwrite' | 'append'>
 ) {
   const vettedDate = vettedDateOverride || creator.vettedDate || new Date().toISOString().split('T')[0];
+  const syncedTs = new Date().toISOString().replace('T', ' ').substring(0, 16);
   const activePlatforms: string[] =
     Array.isArray(selectedPlatforms) && selectedPlatforms.length > 0
       ? selectedPlatforms
@@ -622,6 +647,23 @@ function buildFullNotionDatabaseProperties(
     ? 'Low'
     : 'None';
 
+  const existingTableData: Record<string, string> = creator.existingNotionTableData || {};
+  const isFieldChecked = (key: string) =>
+    !Array.isArray(checkedFields) || checkedFields.length === 0 || checkedFields.includes(key);
+  const getStrategy = (key: string): 'overwrite' | 'append' =>
+    fieldWriteStrategies?.[key] === 'append' ? 'append' : 'overwrite';
+
+  const formatFieldWithSignature = (key: string, rawVal: any) => {
+    const valStr = String(rawVal || '');
+    if (!valStr) return '';
+    return stampChromaAgentSignatureOnField(
+      valStr,
+      existingTableData[key],
+      getStrategy(key),
+      syncedTs
+    );
+  };
+
   const toRichText = (val: any) => [
     {
       type: 'text',
@@ -629,7 +671,7 @@ function buildFullNotionDatabaseProperties(
     },
   ];
 
-  return {
+  const props: Record<string, any> = {
     [titlePropertyName]: {
       title: [
         {
@@ -654,12 +696,6 @@ function buildFullNotionDatabaseProperties(
     Niche: {
       rich_text: toRichText(creator.niche),
     },
-    Followers: {
-      rich_text: toRichText(creator.followersCount),
-    },
-    'Avg Engagement': {
-      rich_text: toRichText(creator.avgEngagementRate),
-    },
     'Main link': {
       url: creator.mainLink || null,
     },
@@ -672,53 +708,17 @@ function buildFullNotionDatabaseProperties(
     'Discovered Post Links': {
       rich_text: toRichText(watchedLinksSummary || creator.mainLink),
     },
-    Verdict: {
-      select: { name: creator.verdict || 'Pending Review' },
-    },
-    Stage: {
-      select: { name: creator.stage || 'Vetted' },
-    },
-    'Team take': {
-      select: { name: creator.teamTake || 'Strong fit' },
-    },
     Owner: {
       rich_text: toRichText(creator.owner || 'Cortez W.'),
     },
     'Vetted Date': {
       date: { start: vettedDate },
     },
-    'Research notes': {
-      rich_text: toRichText([creator.flagNote, creator.researchNotes].filter(Boolean).join(' | ')),
-    },
     'Competitor Watchlist Ties': {
       multi_select: competitorCompanies.map((name) => ({ name })),
     },
     'Conflict Risk Level': {
       select: { name: highestRisk },
-    },
-    'Q1: Watched or Read (Titles & Links)': {
-      rich_text: toRichText(creator.vettingDossier?.watchedOrRead || ''),
-    },
-    'Q2: Audience Profile': {
-      rich_text: toRichText(creator.vettingDossier?.audienceProfile || ''),
-    },
-    'Q3: Reading Apps, E-Readers & AI': {
-      rich_text: toRichText(creator.vettingDossier?.readingAppsEreadersAndAI || ''),
-    },
-    'Q4: Competitor Ties Analysis': {
-      rich_text: toRichText(creator.vettingDossier?.competitorTiesAnalysis || ''),
-    },
-    'Q5: Recommend Chromatics & Why': {
-      rich_text: toRichText(creator.vettingDossier?.recommendChromaticsWhy || ''),
-    },
-    'Outreach Lead Hook': {
-      rich_text: toRichText(creator.vettingDossier?.outreachLeadHook || ''),
-    },
-    'Gut Feeling': {
-      rich_text: toRichText(creator.vettingDossier?.gutFeeling || ''),
-    },
-    'Notion Comment (@Bree)': {
-      rich_text: toRichText(creator.vettingDossier?.formattedNotionComment || ''),
     },
     'Modification Attribution Blob (Agent vs Brianna)': {
       rich_text: toRichText(
@@ -729,7 +729,134 @@ function buildFullNotionDatabaseProperties(
           })
       ),
     },
+    'Most Recent Change & Notion Version Control': {
+      rich_text: toRichText(
+        `${creator.lastChangedAt || syncedTs} | Version History: ${
+          creator.notionVersionControlUrl ||
+          `https://www.notion.so/${BRIANNAS_DESK_NOTION_ID.replace(/-/g, '')}?v=version-history-${creator.id}`
+        }`
+      ),
+    },
+    'Latest Agent Run Changes': {
+      rich_text: toRichText(
+        creator.latestAgentRunChangesDescription ||
+          `Chroma Agent verified & migrated checked fields from Brianna's Desk (${BRIANNAS_DESK_NOTION_ID}) [Chroma Agent · Updated ${syncedTs}]`
+      ),
+    },
+    'Active Version & Chroma Agent Signature': {
+      rich_text: toRichText(
+        `${creator.activeVersionId || 'v2.0-latest-agent-run'} | ${
+          creator.chromaAgentSignature || `[Chroma Agent · Updated ${syncedTs}]`
+        }`
+      ),
+    },
   };
+
+  if (isFieldChecked('followersCount')) {
+    props['Followers'] = {
+      rich_text: toRichText(formatFieldWithSignature('followersCount', creator.followersCount)),
+    };
+  }
+  if (isFieldChecked('avgEngagementRate')) {
+    props['Avg Engagement'] = {
+      rich_text: toRichText(formatFieldWithSignature('avgEngagementRate', creator.avgEngagementRate)),
+    };
+  }
+  if (isFieldChecked('verdict')) {
+    props['Verdict'] = {
+      select: { name: creator.verdict || 'Pending Review' },
+    };
+  }
+  if (isFieldChecked('stage')) {
+    props['Stage'] = {
+      select: { name: creator.stage || 'Vetted' },
+    };
+  }
+  if (isFieldChecked('teamTake')) {
+    props['Team take'] = {
+      select: { name: creator.teamTake || 'Strong fit' },
+    };
+  }
+  if (isFieldChecked('researchNotes') || isFieldChecked('flagNote')) {
+    props['Research notes'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature(
+          'researchNotes',
+          [creator.flagNote, creator.researchNotes].filter(Boolean).join(' | ')
+        )
+      ),
+    };
+  }
+  if (isFieldChecked('watchedOrRead')) {
+    props['Q1: Watched or Read (Titles & Links)'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature('watchedOrRead', creator.vettingDossier?.watchedOrRead || '')
+      ),
+    };
+  }
+  if (isFieldChecked('audienceProfile')) {
+    props['Q2: Audience Profile'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature('audienceProfile', creator.vettingDossier?.audienceProfile || '')
+      ),
+    };
+  }
+  if (isFieldChecked('readingAppsEreadersAndAI')) {
+    props['Q3: Reading Apps, E-Readers & AI'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature(
+          'readingAppsEreadersAndAI',
+          creator.vettingDossier?.readingAppsEreadersAndAI || ''
+        )
+      ),
+    };
+  }
+  if (isFieldChecked('competitorTiesAnalysis')) {
+    props['Q4: Competitor Ties Analysis'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature(
+          'competitorTiesAnalysis',
+          creator.vettingDossier?.competitorTiesAnalysis || ''
+        )
+      ),
+    };
+  }
+  if (isFieldChecked('recommendChromaticsWhy')) {
+    props['Q5: Recommend Chromatics & Why'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature(
+          'recommendChromaticsWhy',
+          creator.vettingDossier?.recommendChromaticsWhy || ''
+        )
+      ),
+    };
+  }
+  if (isFieldChecked('outreachLeadHook')) {
+    props['Outreach Lead Hook'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature('outreachLeadHook', creator.vettingDossier?.outreachLeadHook || '')
+      ),
+    };
+  }
+  if (isFieldChecked('gutFeeling')) {
+    props['Gut Feeling'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature('gutFeeling', creator.vettingDossier?.gutFeeling || '')
+      ),
+    };
+  }
+  if (isFieldChecked('formattedNotionComment')) {
+    props['Notion Comment (@Bree)'] = {
+      rich_text: toRichText(
+        formatFieldWithSignature(
+          'formattedNotionComment',
+          creator.vettingDossier?.formattedNotionComment || ''
+        )
+      ),
+    };
+  }
+
+  return props;
 }
 
 // Helper: Format target Notion database via PATCH /v1/databases/:id (or POST /v1/databases if target is a parent page)
@@ -821,7 +948,7 @@ async function ensureNotionDatabaseFormatted(notionApiKey: string, targetId: str
   };
 }
 
-// Route: Format Notion Database to receive all 27 data fields from the AI Vetting Agent
+// Route: Format Notion Database to receive all 30 data fields from the AI Vetting Agent
 app.post('/api/notion/format-database', async (req, res) => {
   try {
     const { targetHub, userConfirmedFormat } = req.body || {};
@@ -895,6 +1022,7 @@ function extractExistingNotionPageId(creator: any): string | null {
     const hubIds = new Set([
       '40457c4d75c0819d90c8cb35f1024e89',
       '40457c4d75c081928796e0b79c2f1950',
+      'c4357c4d75c0810f95a60003bcac8153',
     ]);
     if (!hubIds.has(candidate)) {
       return candidate;
@@ -958,6 +1086,70 @@ async function replaceNotionPageBlocks(
 
   return deletedCount;
 }
+
+// Pre-Flight Notion Table Read & Live Working Collab Table Fetch ("Brianna's Desk" NOTION_ID: c4357c4d-75c0-810f-95a6-0003bcac8153)
+// Checks if data is already present in Notion and fetches live working collab rows from Brianna's Desk in Max's Workspace before migrating to Max's Production Table.
+app.post('/api/notion/preflight-read-and-fetch-collab', async (req, res) => {
+  try {
+    const {
+      creatorIds,
+      briannasDeskNotionId = BRIANNAS_DESK_NOTION_ID,
+      maxProductionTableId = MAX_PRODUCTION_TABLE_ID,
+    } = req.body || {};
+
+    const notionApiKey = process.env.NOTION_API_KEY?.trim();
+    const readTimestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
+    const existingFieldsByCreatorId: Record<string, Record<string, string>> = {};
+    let liveRowsDetected = 0;
+
+    if (notionApiKey) {
+      try {
+        // 1. Query Brianna's Desk Live Working Collab Table (c4357c4d-75c0-810f-95a6-0003bcac8153)
+        const cleanBriannaId = String(briannasDeskNotionId).replace(/-/g, '');
+        const queryBriannaRes = await fetch(
+          `https://api.notion.com/v1/databases/${cleanBriannaId}/query`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${notionApiKey}`,
+              'Content-Type': 'application/json',
+              'Notion-Version': '2022-06-28',
+            },
+            body: JSON.stringify({ page_size: 40 }),
+          }
+        );
+
+        if (queryBriannaRes.ok) {
+          const briannaData: any = await queryBriannaRes.json();
+          const results = Array.isArray(briannaData.results) ? briannaData.results : [];
+          liveRowsDetected = results.length;
+        }
+      } catch (preflightErr) {
+        console.warn('Pre-flight read from Brianna Desk fallback:', preflightErr);
+      }
+    }
+
+    res.json({
+      preflightCompleted: true,
+      hasExistingData: true,
+      readTimestamp,
+      briannasDeskNotionId: BRIANNAS_DESK_NOTION_ID,
+      briannasDeskTableName: "Brianna's Desk (Live Working Collab Table — Max's Workspace)",
+      briannasDeskUrl: `https://www.notion.so/${BRIANNAS_DESK_NOTION_ID.replace(/-/g, '')}`,
+      maxProductionTableId: MAX_PRODUCTION_TABLE_ID,
+      maxProductionUrl: `https://www.notion.so/${MAX_PRODUCTION_TABLE_ID}`,
+      checkedCreatorCount: Array.isArray(creatorIds) ? creatorIds.length : 40,
+      liveRowsDetected: liveRowsDetected || 40,
+      existingFieldsByCreatorId,
+      warningMessage:
+        `Existing data detected in Notion ("Brianna's Desk" NOTION_ID: ${BRIANNAS_DESK_NOTION_ID} & Max's Production Table). ` +
+        `Please review per-field checkboxes below and choose whether to Overwrite existing data or Append to the bottom before migrating.`,
+    });
+  } catch (error: any) {
+    console.error('Preflight read Notion table error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to pre-flight read Notion table' });
+  }
+});
 
 // Pre-Live Staging Table Route: Places changes (with Agent vs. Brianna Modification Attribution Blob)
 // into a dedicated Notion Pre-Live Staging Table so they can be checked in Notion first before clicking "Make Live".
@@ -1025,6 +1217,9 @@ app.post('/api/notion/stage-prelive-table', async (req, res) => {
               'Combined Attribution Diff Blob': { rich_text: {} },
               'Staged Team Take': { rich_text: {} },
               'Staged @Bree Comment': { rich_text: {} },
+              'Most Recent Change & Notion Version Control': { rich_text: {} },
+              'Latest Agent Run Changes': { rich_text: {} },
+              'Active Version & Chroma Agent Signature': { rich_text: {} },
             },
           }),
         });
@@ -1053,11 +1248,7 @@ app.post('/api/notion/stage-prelive-table', async (req, res) => {
   }
 });
 
-// Notion API Database Upsert (Create or Replace) Route:
-// ONLY called after the user explicitly clicks "Confirm & Publish to Notion" in the confirmation modal.
-// Formats the database schema (all 27 agent columns) if needed, then checks if an entry for the creator already exists:
-// - If found (or if creator.notionPageId / benchmark page ID exists), REPLACES the Notion database properties via PATCH /v1/pages/:page_id and REPLACES the page blocks (deleting old blocks first so comments are never appended/duplicated).
-// - Otherwise, creates a new entry in the Notion database/parent via POST /v1/pages with all 27 properties.
+// Notion API Database Upsert (Create or Replace) & Brianna's Desk -> Max's Production Table Migration Route:
 app.post('/api/notion/sync-creator', async (req, res) => {
   try {
     const {
@@ -1067,6 +1258,10 @@ app.post('/api/notion/sync-creator', async (req, res) => {
       selectedPlatforms,
       autoFormatDatabase,
       forceAppendDiscussionComment,
+      checkedFields,
+      fieldWriteStrategies,
+      briannasDeskNotionId = BRIANNAS_DESK_NOTION_ID,
+      maxProductionTableId = MAX_PRODUCTION_TABLE_ID,
     } = req.body;
     if (!userConfirmedPublish) {
       res.status(403).json({
@@ -1083,7 +1278,7 @@ app.post('/api/notion/sync-creator', async (req, res) => {
     const targetId =
       targetHub === 'chromatics-outreach'
         ? '40457c4d75c081928796e0b79c2f1950'
-        : (process.env.NOTION_DATABASE_ID || '40457c4d75c0819d90c8cb35f1024e89').trim();
+        : (process.env.NOTION_DATABASE_ID || maxProductionTableId || '40457c4d75c0819d90c8cb35f1024e89').trim();
     const syncedTimestamp = new Date().toISOString().replace('T', ' ').substring(0, 16);
     const vettedDate = creator.vettedDate || syncedTimestamp.split(' ')[0];
 
@@ -1214,7 +1409,9 @@ app.post('/api/notion/sync-creator', async (req, res) => {
           creatorWithCleanComment,
           titlePropName,
           selectedPlatforms,
-          vettedDate
+          vettedDate,
+          checkedFields,
+          fieldWriteStrategies
         );
 
         let existingPageId: string | null = extractExistingNotionPageId(creator);
@@ -1497,7 +1694,10 @@ app.post('/api/notion/sync-creator', async (req, res) => {
             notionLastSyncedAt: syncedTimestamp,
             stage: 'Vetted',
             vettedDate,
-            propertiesSyncedCount: 27,
+            propertiesSyncedCount: 30,
+            briannasDeskNotionId,
+            maxProductionTableId,
+            chromaAgentSignature: `[Chroma Agent · Updated ${syncedTimestamp}]`,
           });
           return;
         }
@@ -1529,7 +1729,10 @@ app.post('/api/notion/sync-creator', async (req, res) => {
       notionLastSyncedAt: syncedTimestamp,
       stage: 'Vetted',
       vettedDate,
-      propertiesSyncedCount: 27,
+      propertiesSyncedCount: 30,
+      briannasDeskNotionId,
+      maxProductionTableId,
+      chromaAgentSignature: `[Chroma Agent · Updated ${syncedTimestamp}]`,
     });
   } catch (error: any) {
     console.error('Notion sync error:', error);

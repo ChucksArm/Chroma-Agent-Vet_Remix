@@ -6,11 +6,22 @@ import {
   NotionDatabaseColumnSpec,
   SocialPlatformType,
   ProjectToneMode,
-  CommentBulletFormat
+  CommentBulletFormat,
+  ChromaSyncableFieldKey,
+  FieldWriteStrategy,
+  ContactCardVersionSnapshot
 } from '../types';
 
 export const NOTION_DESK_URL = 'https://app.notion.com/p/40457c4d75c0819d90c8cb35f1024e89';
 export const NOTION_DESK_ID = '40457c4d75c0819d90c8cb35f1024e89';
+
+export const BRIANNAS_DESK_COLLAB_NOTION_ID = 'c4357c4d-75c0-810f-95a6-0003bcac8153';
+export const BRIANNAS_DESK_COLLAB_NOTION_URL =
+  'https://www.notion.so/c4357c4d75c0810f95a60003bcac8153';
+
+export const MAX_PRODUCTION_TABLE_ID = '40457c4d75c0819d90c8cb35f1024e89';
+export const MAX_PRODUCTION_TABLE_URL =
+  'https://app.notion.com/p/40457c4d75c0819d90c8cb35f1024e89';
 
 export const CHROMATICS_OUTREACH_URL = 'https://app.notion.com/p/Chromatics-Outreach-40457c4d75c081928796e0b79c2f1950';
 export const CHROMATICS_OUTREACH_ID = '40457c4d75c081928796e0b79c2f1950';
@@ -26,6 +37,31 @@ export const SARA_TEMPLATE_NOTION_URL =
 
 export const SARA_INSTAGRAM_URL =
   'https://www.instagram.com/bookish.victorian?xtok=MXRxeXZoNnVvNnV5NA==';
+
+export function formatChromaAgentSignature(timestamp?: string): string {
+  const ts = timestamp || new Date().toISOString().replace('T', ' ').substring(0, 16);
+  return `[Chroma Agent · Updated ${ts}]`;
+}
+
+export function applyChromaSignatureAndWriteStrategy(
+  incomingValue: string,
+  existingNotionValue: string | undefined,
+  strategy: FieldWriteStrategy,
+  timestamp?: string
+): string {
+  const signature = formatChromaAgentSignature(timestamp);
+  const cleanIncoming = String(incomingValue || '')
+    .replace(/\s*\[Chroma Agent · Updated [^\]]+\]/gi, '')
+    .trim();
+  const signedIncoming = cleanIncoming ? `${cleanIncoming} ${signature}` : signature;
+
+  if (strategy === 'append' && existingNotionValue && existingNotionValue.trim().length > 0) {
+    return `${existingNotionValue.trim()}\n\n--- Appended (${
+      timestamp || 'Latest Run'
+    }) ---\n${signedIncoming}`;
+  }
+  return signedIncoming;
+}
 
 export const COMPETITOR_WATCHLIST = [
   'Fable',
@@ -256,6 +292,27 @@ export const AGENT_DB_SCHEMA_COLUMNS: NotionDatabaseColumnSpec[] = [
     agentSourceField: 'modificationBlob.serializedDiffBlob',
     category: '5 Evaluation Answers & @Bree Output',
     description: 'Structured attribution blob differentiating AI Agent modifications from Brianna manual edits'
+  },
+  {
+    columnName: 'Most Recent Change & Notion Version Control',
+    notionType: 'rich_text',
+    agentSourceField: 'creator.lastChangedAt + creator.notionVersionControlUrl',
+    category: 'Notion Desk Status',
+    description: 'Timestamp of most recent contact update + direct link to the Notion Version Control history screen'
+  },
+  {
+    columnName: 'Latest Agent Run Changes',
+    notionType: 'rich_text',
+    agentSourceField: 'creator.latestAgentRunChangesDescription',
+    category: '5 Evaluation Answers & @Bree Output',
+    description: 'Detailed description of all field updates made during the latest Chroma Agent run'
+  },
+  {
+    columnName: 'Active Version & Chroma Agent Signature',
+    notionType: 'rich_text',
+    agentSourceField: 'creator.activeVersionId + creator.chromaAgentSignature',
+    category: 'Notion Desk Status',
+    description: 'Current contact card version ID (revertible prior to migration) and Chroma Agent timestamp signature'
   }
 ];
 
@@ -291,6 +348,15 @@ export function formatCreatorForDatabaseRow(
     }
   });
 
+  const lastChanged = c.lastChangedAt || c.modificationBlob?.lastUpdatedAt || '2026-10-31 20:04';
+  const vcUrl =
+    c.notionVersionControlUrl ||
+    `https://www.notion.so/${BRIANNAS_DESK_COLLAB_NOTION_ID.replace(/-/g, '')}?p=${c.id}&v=version-history`;
+  const latestAgentRunDesc =
+    c.latestAgentRunChangesDescription ||
+    `Chroma Agent updated Q1–Q5 answers, Outreach Lead Hook, Gut Feeling & @Bree shrunk-down template; audited ${c.platforms.join(', ')} & 13-competitor watchlist.`;
+  const sig = c.chromaAgentSignature || formatChromaAgentSignature(lastChanged);
+
   return {
     Name: c.name,
     Rank: String(c.rank),
@@ -302,25 +368,29 @@ export function formatCreatorForDatabaseRow(
     'Main link': c.mainLink,
     Platforms: c.platforms.join(', '),
     'Audited Platforms': selectedPlatforms.join(', '),
-    'Discovered Post Links': discoveredLinksText || c.mainLink,
+    'Discovered Post Links': `${discoveredLinksText || c.mainLink} ${sig}`,
     Verdict: c.verdict,
     Stage: c.stage,
     'Team take': c.teamTake,
     Owner: c.owner,
     'Vetted Date': c.vettedDate || new Date().toISOString().split('T')[0],
-    'Research notes': [c.flagNote, c.researchNotes].filter(Boolean).join(' | '),
-    'Competitor Watchlist Ties': competitorNames.length > 0 ? competitorNames.join(', ') : 'None detected',
+    'Research notes': `${[c.flagNote, c.researchNotes].filter(Boolean).join(' | ')} ${sig}`,
+    'Competitor Watchlist Ties':
+      competitorNames.length > 0 ? `${competitorNames.join(', ')} ${sig}` : `None detected ${sig}`,
     'Conflict Risk Level': highestRisk,
-    'Q1: Watched or Read (Titles & Links)': c.vettingDossier.watchedOrRead,
-    'Q2: Audience Profile': c.vettingDossier.audienceProfile,
-    'Q3: Reading Apps, E-Readers & AI': c.vettingDossier.readingAppsEreadersAndAI,
-    'Q4: Competitor Ties Analysis': c.vettingDossier.competitorTiesAnalysis,
-    'Q5: Recommend Chromatics & Why': c.vettingDossier.recommendChromaticsWhy,
-    'Outreach Lead Hook': c.vettingDossier.outreachLeadHook,
-    'Gut Feeling': c.vettingDossier.gutFeeling,
-    'Notion Comment (@Bree)': c.vettingDossier.formattedNotionComment,
+    'Q1: Watched or Read (Titles & Links)': `${c.vettingDossier.watchedOrRead} ${sig}`,
+    'Q2: Audience Profile': `${c.vettingDossier.audienceProfile} ${sig}`,
+    'Q3: Reading Apps, E-Readers & AI': `${c.vettingDossier.readingAppsEreadersAndAI} ${sig}`,
+    'Q4: Competitor Ties Analysis': `${c.vettingDossier.competitorTiesAnalysis} ${sig}`,
+    'Q5: Recommend Chromatics & Why': `${c.vettingDossier.recommendChromaticsWhy} ${sig}`,
+    'Outreach Lead Hook': `${c.vettingDossier.outreachLeadHook} ${sig}`,
+    'Gut Feeling': `${c.vettingDossier.gutFeeling} ${sig}`,
+    'Notion Comment (@Bree)': `${c.vettingDossier.formattedNotionComment} ${sig}`,
     'Modification Attribution Blob (Agent vs Brianna)':
-      c.modificationBlob?.serializedDiffBlob || fallbackBlob
+      c.modificationBlob?.serializedDiffBlob || fallbackBlob,
+    'Most Recent Change & Notion Version Control': `${lastChanged} | Notion Version History: ${vcUrl}`,
+    'Latest Agent Run Changes': `${latestAgentRunDesc} ${sig}`,
+    'Active Version & Chroma Agent Signature': `Version: ${c.activeVersionId || 'v2.0'} | ${sig}`
   };
 }
 
@@ -3955,6 +4025,124 @@ export const INITIAL_40_CREATORS = [
     (c.vettingDossier as any).humanWatchComment = styled.formattedNotionComment;
     c.vettingDossier.formattedNotionComment = styled.formattedNotionComment;
   }
+
+  const initialTimestamp = `2026-10-31 19:${String(15 + (c.rank % 40)).padStart(2, '0')}`;
+  const initialSig = formatChromaAgentSignature(initialTimestamp);
+  const vcLink = `https://www.notion.so/${BRIANNAS_DESK_COLLAB_NOTION_ID.replace(/-/g, '')}?p=${c.id}&v=version-history`;
+  const baselineSnapshotDossier: VettingDossier = (c as any).baselineDossier
+    ? { ...(c as any).baselineDossier }
+    : { ...c.vettingDossier };
+
+  const existingTableFields: Partial<Record<ChromaSyncableFieldKey, string>> = {
+    overallSummary: `Pre-existing Brianna's Desk (c4357c4d-75c0-810f-95a6-0003bcac8153) note for ${c.name} (${c.handle}): ${c.researchNotes}`,
+    watchedOrRead: baselineSnapshotDossier.watchedOrRead || `Initial profile link logged: ${c.mainLink}`,
+    audienceProfile: baselineSnapshotDossier.audienceProfile || `Readers following ${c.handle} (${c.niche}).`,
+    readingAppsEreadersAndAI:
+      baselineSnapshotDossier.readingAppsEreadersAndAI || 'Initial notes: physical books & e-readers.',
+    competitorTiesAnalysis:
+      baselineSnapshotDossier.competitorTiesAnalysis ||
+      (c.competitorTies.length > 0
+        ? `Noted ties: ${c.competitorTies.map((t) => `${t.company} (${t.relationshipType})`).join(', ')}`
+        : 'No brand ties logged in initial table row.'),
+    recommendChromaticsWhy:
+      baselineSnapshotDossier.recommendChromaticsWhy || `Evaluating ${c.name} for Chromatics iOS outreach.`,
+    outreachLeadHook: baselineSnapshotDossier.outreachLeadHook || `Lead with ${c.mainLink}`,
+    gutFeeling: baselineSnapshotDossier.gutFeeling || `Initial intake pass for ${c.name}.`,
+    formattedNotionComment:
+      c.originalStructuredReference ||
+      `Initial Brianna's Desk working note for ${c.name} (${c.handle}): ${c.researchNotes} @Bree`,
+    teamTake: c.teamTake,
+    verdict: c.verdict,
+    stage: c.stage,
+    researchNotes: [c.flagNote, c.researchNotes].filter(Boolean).join(' | '),
+    competitorWatchlistTies:
+      c.competitorTies.length > 0
+        ? c.competitorTies.map((t) => t.company).join(', ')
+        : 'None detected',
+    discoveredPostLinks: (c.watchedItems || [])
+      .map((w) => `[${w.platform}] ${w.title} (${w.url})`)
+      .join(' | ')
+  };
+
+  const v1CollabDossier: VettingDossier = {
+    overallSummary: existingTableFields.overallSummary,
+    watchedOrRead: existingTableFields.watchedOrRead || '',
+    audienceProfile: existingTableFields.audienceProfile || '',
+    readingAppsEreadersAndAI: existingTableFields.readingAppsEreadersAndAI || '',
+    competitorTiesAnalysis: existingTableFields.competitorTiesAnalysis || '',
+    recommendChromaticsWhy: existingTableFields.recommendChromaticsWhy || '',
+    outreachLeadHook: existingTableFields.outreachLeadHook || '',
+    gutFeeling: existingTableFields.gutFeeling || '',
+    humanWatchComment: existingTableFields.formattedNotionComment,
+    formattedNotionComment: existingTableFields.formattedNotionComment || ''
+  };
+
+  const versionHistory: ContactCardVersionSnapshot[] = [
+    {
+      versionId: 'v1.0-briannas-desk',
+      versionLabel: "v1.0 — Brianna's Desk Live Collab Baseline (c4357c4d-75c0-810f-95a6-0003bcac8153)",
+      timestamp: '2026-10-30 14:20',
+      author: "Brianna's Desk Collab Table (c4357c4d-75c0-810f-95a6-0003bcac8153)",
+      changesDescription: `Initial contact card fetched from Brianna's Desk Live Working Collab Table in Max's Workspace (NOTION_ID: c4357c4d-75c0-810f-95a6-0003bcac8153). Pre-vetting research notes & links only.`,
+      chromaSignature: '[Brianna’s Desk Baseline · 2026-10-30 14:20]',
+      notionVersionHistoryUrl: vcLink,
+      snapshotData: {
+        teamTake: c.rank <= 3 ? 'Strong fit' : 'Maybe',
+        verdict: c.flagNote ? 'Possible conflict' : 'Pending Review',
+        stage: c.rank <= 3 ? 'Vetted' : 'To vet',
+        researchNotes: c.researchNotes,
+        vettingDossier: v1CollabDossier
+      }
+    },
+    {
+      versionId: 'v1.1-pre-tone-audit',
+      versionLabel: 'v1.1 — Structured 25-Min Research Dossier Snapshot',
+      timestamp: '2026-10-31 11:10',
+      author: 'Chroma Agent',
+      changesDescription: `Chroma Agent completed 25-minute deep social audit across ${c.platforms.join(', ')} (${c.watchedItems.length} clips indexed) & 13-company competitor scan.`,
+      chromaSignature: '[Chroma Agent · Updated 2026-10-31 11:10]',
+      notionVersionHistoryUrl: vcLink,
+      snapshotData: {
+        teamTake: c.teamTake,
+        verdict: c.verdict,
+        stage: c.stage,
+        researchNotes: c.researchNotes,
+        vettingDossier: {
+          ...baselineSnapshotDossier,
+          formattedNotionComment:
+            (c.vettingDossier as any).structuredResearchComment ||
+            baselineSnapshotDossier.formattedNotionComment
+        }
+      }
+    },
+    {
+      versionId: 'v2.0-latest-agent-run',
+      versionLabel: `v2.0 — Latest Chroma Agent Run (Shrunk-Down Q&A + Blobs · Signed)`,
+      timestamp: initialTimestamp,
+      author: 'Chroma Agent',
+      changesDescription: `Chroma Agent rewrote all 8 vetting sections + shrunk-down numbered/dash @Bree comment in hybrid-nyc-bree voice (Rank #${c.rank} fatigue curve) and stamped Chroma Agent signature.`,
+      chromaSignature: initialSig,
+      notionVersionHistoryUrl: vcLink,
+      snapshotData: {
+        teamTake: c.teamTake,
+        verdict: c.verdict,
+        stage: c.stage,
+        researchNotes: c.researchNotes,
+        vettingDossier: { ...c.vettingDossier }
+      }
+    }
+  ];
+
+  (c as any).lastChangedAt = initialTimestamp;
+  (c as any).notionVersionControlUrl = vcLink;
+  (c as any).latestAgentRunChangesDescription =
+    versionHistory[versionHistory.length - 1].changesDescription;
+  (c as any).chromaAgentSignature = initialSig;
+  (c as any).versionHistory = versionHistory;
+  (c as any).activeVersionId = 'v2.0-latest-agent-run';
+  (c as any).existingNotionTableData = existingTableFields;
+  (c as any).hasExistingNotionData = true;
+
   return c;
 }) as unknown as CreatorRecord[];
 

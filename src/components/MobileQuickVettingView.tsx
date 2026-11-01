@@ -220,67 +220,168 @@ export default function MobileQuickVettingView({
           : 'md:hidden'
       } pb-24 space-y-3.5 px-3 pt-2`}
     >
-      {/* Compact Sticky Mobile App Bar */}
-      <div className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border border-stone-200 rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2 shadow-xs">
-        <div className="min-w-0">
-          <div className="flex items-center gap-1.5">
-            <Smartphone className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-            <span className="font-display text-sm font-bold text-slate-900 truncate">
-              Chromatics Mobile Desk
-            </span>
+      {/* Compact Sticky Mobile App Bar + 7 Numbered Navigation Links */}
+      <div className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border border-stone-200 rounded-2xl px-3.5 py-2.5 space-y-2 shadow-xs">
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <Smartphone className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+              <span className="font-display text-sm font-bold text-slate-900 truncate">
+                Chromatics Mobile Desk
+              </span>
+            </div>
+            <p className="text-[10px] text-slate-500 truncate">
+              {activeView === 'performance-dashboard'
+                ? '3. Performance: Engagement vs. Reach (40)'
+                : activeView === 'prelive-staging'
+                ? '4. Pre-Live Staging & Version Control (Brianna Desk)'
+                : activeView === 'spreadsheet'
+                ? '5. 30-Col Notion DB & Google Sheets'
+                : activeView === 'competitor-radar'
+                ? `6. 13-Competitor Watchlist (${conflicts.length} Flags)`
+                : activeView === 'boss-questions'
+                ? '7. 5 Executive Vetting Questions'
+                : activeView === 'workspace-scanner'
+                ? '1. Workspace Scan & Brianna Desk'
+                : '2. Notion Vetting Queue & @Bree Notes'}
+            </p>
           </div>
-          <p className="text-[10px] text-slate-500 truncate">
-            {activeView === 'performance-dashboard'
-              ? 'Performance: Engagement vs. Reach (40)'
-              : activeView === 'spreadsheet'
-              ? '27-Col Notion DB & Google Sheets'
-              : activeView === 'competitor-radar'
-              ? `13-Competitor Watchlist (${conflicts.length} Flags)`
-              : activeView === 'workspace-scanner' || activeView === 'boss-questions'
-              ? 'Workspace Scan & 5 Questions'
-              : 'Notion Vetting Queue & @Bree Notes'}
-          </p>
-        </div>
 
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            onClick={onToggleQuickVetting}
-            className={`min-h-[40px] px-2.5 py-1.5 rounded-xl border text-[11px] font-semibold flex items-center gap-1 cursor-pointer ${
-              isQuickVettingMode
-                ? 'bg-emerald-600 text-white border-emerald-500'
-                : 'bg-stone-100 text-slate-700 border-stone-300'
-            }`}
-            title="Quick Vetting Mode: Max 3 recent posts per platform"
-          >
-            <Zap className="w-3.5 h-3.5 fill-current" />
-            <span>{isQuickVettingMode ? '3 Posts' : 'Quick'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={onToggleDarkMode}
-            className="min-h-[40px] min-w-[40px] rounded-xl border border-stone-300 bg-stone-100 text-slate-700 flex items-center justify-center cursor-pointer"
-            aria-label="Toggle Dark Mode"
-          >
-            {isDarkMode ? (
-              <Sun className="w-4 h-4 text-amber-400" />
-            ) : (
-              <Moon className="w-4 h-4" />
-            )}
-          </button>
-
-          {forceMobilePreview && onToggleMobilePreview && (
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={onToggleMobilePreview}
-              className="min-h-[40px] px-2.5 py-1.5 rounded-xl bg-slate-900 text-white text-[11px] font-semibold cursor-pointer"
+              onClick={onToggleQuickVetting}
+              className={`min-h-[38px] px-2.5 py-1.5 rounded-xl border text-[11px] font-semibold flex items-center gap-1 cursor-pointer ${
+                isQuickVettingMode
+                  ? 'bg-emerald-600 text-white border-emerald-500'
+                  : 'bg-stone-100 text-slate-700 border-stone-300'
+              }`}
+              title="Quick Vetting Mode: Max 3 recent posts per platform"
             >
-              Exit Mobile
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>{isQuickVettingMode ? '3 Posts' : 'Quick'}</span>
             </button>
-          )}
+
+            <button
+              type="button"
+              onClick={onToggleDarkMode}
+              className="min-h-[38px] min-w-[38px] rounded-xl border border-stone-300 bg-stone-100 text-slate-700 flex items-center justify-center cursor-pointer"
+              aria-label="Toggle Dark Mode"
+            >
+              {isDarkMode ? (
+                <Sun className="w-4 h-4 text-amber-400" />
+              ) : (
+                <Moon className="w-4 h-4" />
+              )}
+            </button>
+
+            {forceMobilePreview && onToggleMobilePreview && (
+              <button
+                type="button"
+                onClick={onToggleMobilePreview}
+                className="min-h-[38px] px-2.5 py-1.5 rounded-xl bg-slate-900 text-white text-[11px] font-semibold cursor-pointer"
+              >
+                Exit Mobile
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Scrollable 1–7 Numbered Navigation Bar */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 no-scrollbar">
+          {(
+            [
+              { id: 'workspace-scanner', num: '1.', label: 'Workspace Scan' },
+              { id: 'notion-desk', num: '2.', label: 'Notion Desk' },
+              { id: 'performance-dashboard', num: '3.', label: 'Performance Dashboard' },
+              { id: 'prelive-staging', num: '4.', label: 'Pre-Live Staging' },
+              { id: 'spreadsheet', num: '5.', label: 'Sheets & Notion DB' },
+              { id: 'competitor-radar', num: '6.', label: 'Competitor Watchlist' },
+              { id: 'boss-questions', num: '7.', label: 'Vetting Questions' },
+            ] as const
+          ).map((item) => {
+            const isActive = activeView === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => onSwitchView(item.id)}
+                className={`px-2.5 py-1 text-[11px] font-semibold rounded-lg whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1 ${
+                  isActive
+                    ? 'bg-slate-900 text-white shadow-xs'
+                    : 'bg-stone-100 text-slate-700 border border-stone-200'
+                }`}
+              >
+                <span className="font-mono text-[10px] opacity-80">{item.num}</span>
+                <span>{item.label}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
+
+      {/* MOBILE PAGE 4: PRE-LIVE STAGING & VERSION CONTROL */}
+      {activeView === 'prelive-staging' && (
+        <div className="bg-white border border-stone-200 rounded-2xl p-3.5 space-y-3 shadow-xs">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="font-display text-xs font-bold text-slate-900">
+                4. Pre-Live Staging, Version Revert &amp; Brianna&apos;s Desk Migration
+              </h3>
+              <p className="text-[10px] text-slate-500 font-mono">
+                Brianna&apos;s Desk NOTION_ID: c4357c4d-75c0-810f-95a6-0003bcac8153
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => onOpenSyncModal(creators)}
+              className="px-2.5 py-1.5 text-[11px] font-semibold bg-emerald-700 text-white rounded-xl cursor-pointer shrink-0"
+            >
+              Migrate All (40)
+            </button>
+          </div>
+          <div className="space-y-2 max-h-[65vh] overflow-y-auto pr-0.5">
+            {creators.map((c) => (
+              <div
+                key={c.id}
+                className="p-2.5 rounded-xl border border-stone-200 bg-stone-50/70 space-y-1.5 text-[11px]"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-bold text-slate-900">
+                    #{c.rank} {c.name} ({c.handle})
+                  </span>
+                  <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-800 border border-indigo-200">
+                    {c.activeVersionId || 'v2.0'}
+                  </span>
+                </div>
+                <div className="font-mono text-[10px] text-emerald-800">
+                  {c.chromaAgentSignature} · Changed: {c.lastChangedAt}
+                </div>
+                <p className="text-[10px] text-slate-600 line-clamp-2">
+                  {c.latestAgentRunChangesDescription}
+                </p>
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <a
+                    href={c.notionVersionControlUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[10px] font-semibold text-indigo-700 underline"
+                  >
+                    Notion Version Control
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => onOpenSyncModal([c])}
+                    className="px-2 py-1 text-[10px] font-semibold bg-slate-900 text-white rounded-lg cursor-pointer"
+                  >
+                    Fetch Brianna&apos;s Desk &amp; Migrate
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* MOBILE PAGE 1: PERFORMANCE DASHBOARD (Engagement vs. Follower Counts across 40 Records) */}
       {activeView === 'performance-dashboard' && (

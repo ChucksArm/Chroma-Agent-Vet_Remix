@@ -84,9 +84,67 @@ export type PreLiveStagingStatus =
   | 'checked-in-notion'
   | 'live';
 
+export type ChromaSyncableFieldKey =
+  | 'overallSummary'
+  | 'watchedOrRead'
+  | 'audienceProfile'
+  | 'readingAppsEreadersAndAI'
+  | 'competitorTiesAnalysis'
+  | 'recommendChromaticsWhy'
+  | 'outreachLeadHook'
+  | 'gutFeeling'
+  | 'formattedNotionComment'
+  | 'teamTake'
+  | 'verdict'
+  | 'stage'
+  | 'researchNotes'
+  | 'competitorWatchlistTies'
+  | 'discoveredPostLinks';
+
+export type FieldWriteStrategy = 'overwrite' | 'append';
+
+export interface FieldSyncItemConfig {
+  fieldKey: ChromaSyncableFieldKey;
+  label: string;
+  notionColumnName: string;
+  checked: boolean;
+  writeStrategy: FieldWriteStrategy;
+  existingNotionValue: string;
+  incomingValue: string;
+  hasExistingDataConflict: boolean;
+}
+
+export interface ContactCardVersionSnapshot {
+  versionId: string;
+  versionLabel: string;
+  timestamp: string;
+  author:
+    | 'Chroma Agent'
+    | 'Brianna'
+    | "Brianna's Desk Collab Table (c4357c4d-75c0-810f-95a6-0003bcac8153)"
+    | "Max's Production Baseline";
+  changesDescription: string;
+  chromaSignature: string;
+  notionVersionHistoryUrl: string;
+  snapshotData: {
+    teamTake: TeamTakeType;
+    verdict: VerdictType;
+    stage: StageType;
+    researchNotes: string;
+    vettingDossier: VettingDossier;
+  };
+}
+
 export interface ModificationAttributionBlob {
   authorMode: ModificationAuthorType;
   lastUpdatedAt: string;
+  blobId?: string;
+  lastModifiedBy?: 'agent-only' | 'brianna' | 'agent-and-brianna';
+  agentModifiedAt?: string;
+  agentModificationSummary?: string;
+  briannaModified?: boolean;
+  briannaModifiedAt?: string;
+  briannaModificationSummary?: string;
   agentBlob: {
     timestamp: string;
     toneModeApplied: string;
@@ -151,6 +209,16 @@ export interface CreatorRecord {
   notionStagingPushedAt?: string;
   notionStagingCheckedByBrianna?: boolean;
   madeLiveAt?: string;
+  // Version Control, Latest Agent Run Changes, Chroma Agent Signature & Brianna's Desk Live Collab Migration
+  lastChangedAt?: string;
+  notionVersionControlUrl?: string;
+  latestAgentRunChangesDescription?: string;
+  chromaAgentSignature?: string;
+  versionHistory?: ContactCardVersionSnapshot[];
+  activeVersionId?: string;
+  existingNotionTableData?: Partial<Record<ChromaSyncableFieldKey, string>>;
+  hasExistingNotionData?: boolean;
+  migratedToMaxProductionAt?: string;
 }
 
 export interface VettingQuestionsConfig {

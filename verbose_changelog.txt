@@ -382,3 +382,30 @@ PHASE 10: SHRUNK-DOWN CONCATENATED Q&A + INFO BLOBS COMMENT TEMPLATE
 - Wired real-time updates in `handleUpdateCreatorField` so editing any of the
   8 Structured Vetting Section textareas immediately updates the local draft
   and the `@Bree` comment preview in real time.
+
+
+================================================================================
+PHASE 11 — PRE-FLIGHT NOTION READ & OVERWRITE/APPEND PER-FIELD CHECKBOXES, CHROMA AGENT SIGNATURES, 3 NEW VERSION CONTROL COLUMNS, CONTACT CARD REVERT, BRIANNA'S DESK (c4357c4d-75c0-810f-95a6-0003bcac8153) MIGRATION TO MAX'S PRODUCTION TABLE, AND FIXED 1–7 NUMBERED NAVIGATION LINKS
+Timestamp: 2026-10-31 20:21 UTC
+================================================================================
+
+1. PRE-FLIGHT NOTION TABLE READ & EXISTING DATA WARNING
+   - Added `POST /api/notion/preflight-read-and-fetch-collab` in `/server.ts` and `handlePreflightReadNotionTable` in `/src/App.tsx` + `/src/components/PreLiveStagingTableView.tsx`.
+   - Before migrating or publishing to Notion, the Chroma Agent reads the target Notion table (both "Brianna's Desk" Live Working Collab Table `c4357c4d-75c0-810f-95a6-0003bcac8153` and Max's Production Table `40457c4d75c0819d90c8cb35f1024e89`) to detect if data is already present.
+   - Displays a prominent Pre-Flight Existing Data Warning Banner alerting the user when existing Notion data is found and letting them apply bulk Overwrite or Append strategies or customize per-field behavior.
+
+2. PER-FIELD CHECKBOXES & OVERWRITE VS. APPEND SELECTOR + CHROMA AGENT SIGNATURE
+   - Added 15 individually selectable fields (`ChromaSyncableFieldKey`) with per-field checkboxes and an `Overwrite Existing` vs. `Append to Bottom` toggle (`FieldWriteStrategy`).
+   - Every field modified or sent by the agent automatically receives the Chroma Agent signature and timestamp (`[Chroma Agent · Updated YYYY-MM-DD HH:mm]`) via `formatChromaAgentSignature` and `applyChromaSignatureAndWriteStrategy`.
+
+3. THREE NEW TABLE COLUMNS & CONTACT CARD VERSION CONTROL / REVERT
+   - Added 3 new columns across the Pre-Live Staging & Migration Table (`PreLiveStagingTableView.tsx`), the 30-Column Spreadsheet DB Inspector (`App.tsx`), and the Notion Database schema (`server.ts` & `initialCreators.ts`):
+     1. `Most Recent Change & Notion Version Control`: Displays `lastChangedAt` timestamp + direct link to the Notion Version Control screen (`notionVersionControlUrl`) and an in-app Version History & Diff modal.
+     2. `Latest Agent Run Changes`: Displays `latestAgentRunChangesDescription` summarizing the exact fields and tone updates performed during the latest Chroma Agent run.
+     3. `Revert Contact Card Version (Before Migration)`: Displays a version selector dropdown (`v1.0-briannas-desk`, `v1.1-pre-tone-audit`, `v2.0-latest-agent-run`, plus any live edits) and a 1-click **Revert** button next to the time and description of the latest updates so the user can revert any contact card back to a prior version before migrating checked-off fields to boss Max's Production Table.
+
+4. FETCH FROM BRIANNA'S DESK (`c4357c4d-75c0-810f-95a6-0003bcac8153`) & MIGRATE TO MAX'S PRODUCTION TABLE
+   - Clicking **Fetch Brianna's Desk & Migrate to Max's Production** reads the live working collab rows from **Brianna's Desk** (`NOTION_ID: c4357c4d-75c0-810f-95a6-0003bcac8153`) in Max's Workspace, applies the user's checked fields + Overwrite/Append strategies + Chroma Agent signatures, and migrates them to Max's Production Table (`40457c4d75c0819d90c8cb35f1024e89`).
+
+5. FIXED NUMBERED NAVIGATION LINKS AT TOP OF PAGE (`1.` THROUGH `7.`)
+   - Refactored the top navigation bar in `/src/App.tsx` and `/src/components/MobileQuickVettingView.tsx` so all 7 views are clearly numbered (`1. Workspace Scan`, `2. Notion Desk`, `3. Performance Dashboard`, `4. Pre-Live Staging & Version Control`, `5. Sheets & Notion DB`, `6. Competitor Watchlist`, `7. Vetting Questions`), never clip or overflow, and smoothly switch active views on both desktop and mobile.
